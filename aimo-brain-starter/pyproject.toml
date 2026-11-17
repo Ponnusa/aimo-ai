@@ -1,0 +1,93 @@
+[project]
+name = "aimo-brain"
+version = "0.1.0"
+description = "AIMO BRAIN workspace root (uv workspace; no runtime code here)"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3.2",
+  "pytest-asyncio>=0.24.0",
+  "aiosqlite>=0.20.0",
+  "httpx>=0.27.2",
+  "ruff>=0.6.8",
+  "mypy>=1.11.2",
+]
+
+[tool.uv.workspace]
+members = [
+  "apps/network-api",
+  "apps/buyer-agent",
+  "apps/supplier-agent",
+  "apps/worker",
+  "packages/agent-runtime",
+  "packages/a2a-integration",
+  "packages/mcp-integration",
+  "packages/identity",
+  "packages/authorization",
+  "packages/trade-protocol",
+  "packages/audit",
+  "packages/database",
+  "industries/food-wholesale",
+]
+
+[tool.uv.sources]
+agent-runtime = { workspace = true }
+a2a-integration = { workspace = true }
+mcp-integration = { workspace = true }
+identity = { workspace = true }
+authorization = { workspace = true }
+trade-protocol = { workspace = true }
+audit = { workspace = true }
+database = { workspace = true }
+aimo-food-wholesale = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["apps", "packages", "industries", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_unused_ignores = true
+disallow_untyped_defs = false
+exclude = ["apps/portal", "migrations", "(^|/)tests/"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "--import-mode=importlib"
+testpaths = [
+  "apps/network-api/tests",
+  "apps/buyer-agent/tests",
+  "apps/supplier-agent/tests",
+  "apps/worker/tests",
+  "packages/agent-runtime/tests",
+  "packages/a2a-integration/tests",
+  "packages/mcp-integration/tests",
+  "packages/identity/tests",
+  "packages/authorization/tests",
+  "packages/trade-protocol/tests",
+  "packages/audit/tests",
+  "packages/database/tests",
+  "industries/food-wholesale/tests",
+  "tests",
+]
+markers = [
+  "contracts: architectural/contract boundary tests",
+  "integration: integration tests requiring local services",
+  "security: adversarial/security test cases",
+  "e2e: end to end smoke tests",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+bypass-selection = true

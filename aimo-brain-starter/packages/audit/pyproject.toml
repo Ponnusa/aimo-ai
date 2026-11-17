@@ -1,0 +1,16 @@
+[project]
+name = "audit"
+version = "0.1.0"
+description = "Append-only evidence recording (proposal versions, policy decisions, approvals, external order references). Scaffolded in M0; implemented starting M4/M5."
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2.9.0",
+  "trade-protocol",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/audit"]

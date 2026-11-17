@@ -1,0 +1,16 @@
+[project]
+name = "agent-runtime"
+version = "0.1.0"
+description = "LLM adapter protocol, deterministic fake LLM, and shared service settings base used by all agent apps."
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2.9.0",
+  "pydantic-settings>=2.4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_runtime"]

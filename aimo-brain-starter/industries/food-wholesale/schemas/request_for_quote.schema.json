@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aimobrain.example/food-wholesale/request_for_quote/v0.1",
+  "title": "Food Wholesale Request for Quote",
+  "type": "object",
+  "required": [
+    "schema",
+    "artifact_id",
+    "transaction_id",
+    "correlation_id",
+    "sender_agent_id",
+    "recipient_agent_id",
+    "organization_id",
+    "domain",
+    "type",
+    "version",
+    "created_at",
+    "expires_at",
+    "payload"
+  ],
+  "properties": {
+    "schema": { "type": "string" },
+    "artifact_id": { "type": "string" },
+    "transaction_id": { "type": "string" },
+    "correlation_id": { "type": "string" },
+    "sender_agent_id": { "type": "string" },
+    "recipient_agent_id": { "type": "string" },
+    "organization_id": { "type": "string" },
+    "domain": { "const": "food-wholesale" },
+    "type": { "const": "request_for_quote" },
+    "version": { "type": "integer", "minimum": 1 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "payload": {
+      "type": "object",
+      "required": ["lines", "delivery_location_ref"],
+      "properties": {
+        "lines": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["product_query", "quantity", "unit"],
+            "properties": {
+              "product_query": { "type": "string" },
+              "quantity": { "type": "string", "description": "decimal string, never a binary float" },
+              "unit": { "type": "string" }
+            }
+          }
+        },
+        "delivery_location_ref": { "type": "string" }
+      }
+    }
+  },
+  "additionalProperties": true
+}

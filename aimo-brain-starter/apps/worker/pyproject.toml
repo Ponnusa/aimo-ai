@@ -1,0 +1,17 @@
+[project]
+name = "worker"
+version = "0.1.0"
+description = "Retry, timeout, inbox/outbox dispatch and reconciliation worker. Scaffolded in M0; real dispatch logic lands in M4."
+requires-python = ">=3.12"
+dependencies = [
+  "pydantic>=2.9.0",
+  "pydantic-settings>=2.4.0",
+  "agent-runtime",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/worker"]
