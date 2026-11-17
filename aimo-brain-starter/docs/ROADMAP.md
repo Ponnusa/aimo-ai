@@ -18,11 +18,12 @@ Milestones are **ordered by dependencies**, not promised calendar dates. Each mi
 - **Done when:** an A2A request/response succeeds across independent services, including restart tests, with no shared private database access.
 - **Done:** both agents run as genuinely separate processes with their own Agent Cards (`a2a-sdk` 1.3.0), exchange a real `product_availability_request`/`product_availability_response` over HTTP (official SDK client/server, no simulated A2A), persist tasks via their own `DatabaseTaskStore` against their own database with proven restart recovery, and pass extended database-isolation contract/security tests. Each agent has its own `Dockerfile` and Railway service config (`infrastructure/railway/*.toml`); the image **build itself was not verified** with `docker build` (Docker is not installed in this environment) — exercise it in CI or locally with Docker before relying on it for a real deployment. See `TASKS.md` M1 section and `docs/DECISIONS.md` ADR-007 for exact verification evidence.
 
-## M2 — Identity, registry and discovery
+## M2 — Identity, registry and discovery — COMPLETE (2026-11-18)
 
 - Implement organization/agent records, endpoint ownership verification, capability search and relationship permissions.
 - Authenticate services and reject untrusted/unauthorized agents.
 - **Done when:** buyer discovers eligible supplier; invalid or revoked relationships fail closed.
+- **Done:** `registry-api` (new, independently deployable service, own database, own Dockerfile/Railway config) owns agent registration, Agent Card fetch/validation over an SSRF-safe transport, capability indexing, endpoint-ownership verification (challenge/response), and lifecycle (pending/active/suspended/revoked). `network-api` owns organization identity, trading relationships, and short-lived scoped service-credential issuance (`packages/identity`, no longer a stub). Buyer discovers the supplier through registry-api (never a hardcoded URL) and then talks to it directly over the official A2A SDK — registry-api never proxies the conversation. Verified end-to-end, over real HTTP across four independently booted servers: discovery without a relationship, a suspended relationship, and a revoked agent each fail closed (return nothing); a malicious `file://` card URL is rejected before any record is stored. See `TASKS.md` M2 section and `docs/DECISIONS.md` ADR-008 for exact verification evidence.
 
 ## M3 — MCP and mock business systems
 

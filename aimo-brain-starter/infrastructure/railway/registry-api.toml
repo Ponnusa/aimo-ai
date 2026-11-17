@@ -1,0 +1,17 @@
+# Railway service config for registry-api.
+#
+# NOT deployed or verified against a real Railway account in this
+# session (no Railway credentials available). This documents the
+# intended independent-service shape: its own Dockerfile, its own build
+# context, its own env vars (REGISTRY_DATABASE_URL,
+# SERVICE_CREDENTIAL_SIGNING_SECRET, NETWORK_API_URL,
+# NETWORK_INTERNAL_SERVICE_KEY, REGISTRY_ALLOW_PRIVATE_NETWORK_CARD_TARGETS)
+# set directly in this Railway service — REGISTRY_ALLOW_PRIVATE_NETWORK_CARD_TARGETS
+# must be left unset/false here; it exists only for local dev/CI.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "apps/registry-api/Dockerfile"
+
+[deploy]
+startCommand = "uv run --project . uvicorn registry_api.app:app --host 0.0.0.0 --port 8003"
+healthcheckPath = "/health"

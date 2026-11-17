@@ -22,6 +22,32 @@ class NetworkApiSettings(ServiceSettings):
         validation_alias="DATABASE_URL",
     )
 
+    # Bootstrap admin secret for organization/relationship management
+    # endpoints. M2 has no human OIDC/approval flow yet (that is M6/M7), so
+    # this shared secret stands in for it; rotate it to immediately revoke
+    # all admin access.
+    network_admin_api_key: str = Field(
+        default="dev-only-admin-key-change-me",
+        validation_alias="NETWORK_ADMIN_API_KEY",
+    )
+
+    # Shared secret used only by other AIMO BRAIN services (registry-api)
+    # calling this service's internal, read-only relationship-lookup
+    # endpoint. Never exposed to the public internet by design.
+    network_internal_service_key: str = Field(
+        default="dev-only-internal-key-change-me",
+        validation_alias="NETWORK_INTERNAL_SERVICE_KEY",
+    )
+
+    # Shared HMAC secret used to issue and verify short-lived service
+    # credentials (see packages/identity). Must match registry-api's
+    # SERVICE_CREDENTIAL_SIGNING_SECRET exactly, or every credential this
+    # service issues will be rejected.
+    service_credential_signing_secret: str = Field(
+        default="dev-only-signing-secret-change-me",
+        validation_alias="SERVICE_CREDENTIAL_SIGNING_SECRET",
+    )
+
 
 @lru_cache
 def get_settings() -> NetworkApiSettings:

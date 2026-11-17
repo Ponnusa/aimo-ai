@@ -20,6 +20,7 @@ from food_wholesale.availability import build_request, validate_response
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from buyer_agent.models import BuyerTaskRecord
+from buyer_agent.registry_client import discover_supplier_via_registry
 from buyer_agent.settings import BuyerAgentSettings
 
 #: The remote skill this client invokes. Not this agent's own skill id —
@@ -63,16 +64,59 @@ async def request_product_availability(
     session_factory: async_sessionmaker,
     lines: list[dict[str, str]],
 ) -> dict[str, Any]:
-    """Discover the supplier, send a product_availability_request, validate
-    and return the response payload. Records this agent's own task history
-    regardless of outcome.
+    """Discover the supplier at its known, hardcoded A2A URL, send a
+    product_availability_request, validate and return the response
+    payload. Records this agent's own task history regardless of outcome.
+
+    This path supports agents outside AIMO BRAIN's own registry entirely
+    (a directly-configured counterparty URL, BYOA-style) — for the
+    registry-mediated path, see :func:`request_product_availability_via_registry`.
 
     Raises :class:`AgentUnavailableError` if the supplier is unreachable,
     or :class:`InvalidAgentResponseError`/:class:`TaskNotCompletedError` if
     it responds but with something unusable.
     """
     agent_card = await discover_supplier_agent_card(settings.supplier_a2a_url)
+    return await _send_and_validate(
+        agent_card, settings=settings, session_factory=session_factory, lines=lines
+    )
 
+
+async def request_product_availability_via_registry(
+    *,
+    settings: BuyerAgentSettings,
+    session_factory: async_sessionmaker,
+    lines: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Discover the supplier through registry-api (capability-indexed,
+    relationship-gated discovery — see ``buyer_agent.registry_client``),
+    then send/validate exactly as :func:`request_product_availability`
+    does. Registry-api is not involved past the discovery step: the A2A
+    exchange itself is direct, over the official SDK.
+
+    Raises :class:`RegistryDiscoveryError` (from
+    ``buyer_agent.registry_client``) if no discoverable, authorized
+    supplier is found; otherwise the same errors as
+    :func:`request_product_availability`.
+    """
+    discovered = await discover_supplier_via_registry(
+        registry_url=settings.registry_api_url,
+        requesting_organization_id=settings.buyer_organization_id,
+        skill_id=TARGET_SKILL_ID,
+    )
+    agent_card = await discover_supplier_agent_card(discovered.a2a_endpoint_url)
+    return await _send_and_validate(
+        agent_card, settings=settings, session_factory=session_factory, lines=lines
+    )
+
+
+async def _send_and_validate(
+    agent_card: AgentCard,
+    *,
+    settings: BuyerAgentSettings,
+    session_factory: async_sessionmaker,
+    lines: list[dict[str, str]],
+) -> dict[str, Any]:
     request_payload = build_request(lines, buyer_organization_id=settings.buyer_organization_id)
 
     message = new_data_message(data=request_payload, role=Role.ROLE_USER)

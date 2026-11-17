@@ -2,12 +2,25 @@
 
 ## Logical topology
 
+As of M2 (see `docs/DECISIONS.md` ADR-008), the single "Network API /
+Registry" box below is split into two independently deployable services:
+`network-api` (organization identity, trading relationships, service
+credentials) and `registry-api` (agent registration, Agent Card
+validation, capability discovery, endpoint-ownership verification,
+lifecycle). They never share a database; registry-api's only
+cross-service call is a read-only, internal-service-key-authenticated
+relationship lookup against network-api's own HTTP API.
+
 ```mermaid
 flowchart TB
-  P[Next.js Management Portal] --> N[Network API / Registry]
+  P[Next.js Management Portal] --> N[Network API]
+  P --> G[Registry API]
   N --> R[(Network Neon DB)]
-  N -. discovery / verification .-> B[Buyer Agent - separate service]
-  N -. discovery / verification .-> S[Supplier Agent - separate service]
+  G --> RG[(Registry Neon DB)]
+  G -. relationship lookup, HTTP only .-> N
+  G -. fetch + validate Agent Card .-> B[Buyer Agent - separate service]
+  G -. fetch + validate Agent Card .-> S[Supplier Agent - separate service]
+  B -. discovery .-> G
   B <-->|Authenticated A2A tasks and artifacts| S
   B --> BP[Buyer Policy Service / OPA]
   S --> SP[Supplier Policy Service / OPA]
@@ -19,11 +32,12 @@ flowchart TB
   S --> SD[(Supplier private state)]
 ```
 
-In a managed environment, separate Neon databases or rigorously isolated schemas/roles may implement the three stores. Self-hosted agents use their own storage. **No cross-organization SQL joins to exchange business data.**
+In a managed environment, separate Neon databases or rigorously isolated schemas/roles may implement each store. Self-hosted agents use their own storage. **No cross-organization SQL joins to exchange business data, and no cross-*service* database access either** — registry-api and network-api each own one database and talk to each other only over HTTP.
 
 ## Deployables
 
-- `apps/network-api`: registry, organization metadata, trading relationships, public protocol schemas, authorization metadata and approval API.
+- `apps/network-api`: organization identities, organization-level trading relationships, short-lived organization-scoped service-credential issuance, public protocol schemas.
+- `apps/registry-api`: agent registration, Agent Card fetch/validation (SSRF-safe), capability indexing, endpoint-ownership verification, agent lifecycle (pending/active/suspended/revoked), capability-indexed discovery (gated by a trading relationship looked up from network-api), registry audit trail. Never proxies an A2A conversation — discovery returns the real A2A endpoint URL, and agents talk to each other directly.
 - `apps/buyer-agent`: independent A2A endpoint, LangGraph workflow, buyer MCP client, buyer policy client and private state.
 - `apps/supplier-agent`: independent A2A endpoint, LangGraph workflow, supplier MCP client, supplier policy client and private state.
 - `apps/worker`: retry, timeout, inbox/outbox dispatch and reconciliation.
@@ -37,6 +51,7 @@ In a managed environment, separate Neon databases or rigorously isolated schemas
 aimo-brain/
   apps/
     network-api/
+    registry-api/
     buyer-agent/
     supplier-agent/
     worker/
@@ -69,7 +84,9 @@ aimo-brain/
 
 ## Persistence
 
-**Network database:** organizations, agents, endpoint verification, capabilities, relationships, trust status, policy metadata, approval references, minimal network audit.
+**Network database (network-api):** organizations, trading relationships, trust status, policy metadata, approval references.
+
+**Registry database (registry-api):** agents, endpoint-verification challenges and status, indexed capabilities, registry audit trail. Deliberately does not store organization records or relationships — those are network-api's, looked up over HTTP, never joined.
 
 **Agent-owned databases:** task/checkpoint state, private prompts and tool results where permitted, inbox/outbox, quotes/agreements, approval evidence, external order references and audit. Prefer separate DB roles and encryption boundaries. Supplier ERP remains authoritative for stock, prices and orders; never treat a cached snapshot as authoritative at commit time.
 

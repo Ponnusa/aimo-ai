@@ -18,6 +18,7 @@ dev = [
 [tool.uv.workspace]
 members = [
   "apps/network-api",
+  "apps/registry-api",
   "apps/buyer-agent",
   "apps/supplier-agent",
   "apps/worker",
@@ -64,6 +65,7 @@ asyncio_default_fixture_loop_scope = "function"
 addopts = "--import-mode=importlib"
 testpaths = [
   "apps/network-api/tests",
+  "apps/registry-api/tests",
   "apps/buyer-agent/tests",
   "apps/supplier-agent/tests",
   "apps/worker/tests",

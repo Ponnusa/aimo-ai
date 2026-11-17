@@ -40,6 +40,10 @@ class BuyerAgentSettings(ServiceSettings):
         default="http://localhost:8002",
         validation_alias="SUPPLIER_A2A_URL",
     )
+    registry_api_url: str = Field(
+        default="http://localhost:8003",
+        validation_alias="REGISTRY_API_URL",
+    )
 
 
 @lru_cache

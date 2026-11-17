@@ -28,9 +28,14 @@ jobs:
           --health-retries 10
     env:
       DATABASE_URL: postgresql+psycopg://user:password@localhost:5432/aimo_network
+      REGISTRY_DATABASE_URL: postgresql+psycopg://user:password@localhost:5432/aimo_registry
       BUYER_DATABASE_URL: postgresql+psycopg://user:password@localhost:5432/aimo_buyer
       SUPPLIER_DATABASE_URL: postgresql+psycopg://user:password@localhost:5432/aimo_supplier
       LLM_PROVIDER: fake
+      NETWORK_ADMIN_API_KEY: ci-test-admin-key
+      NETWORK_INTERNAL_SERVICE_KEY: ci-test-internal-key
+      SERVICE_CREDENTIAL_SIGNING_SECRET: ci-test-signing-secret
+      REGISTRY_ALLOW_PRIVATE_NETWORK_CARD_TARGETS: "true"
     steps:
       - uses: actions/checkout@v4
 
@@ -51,6 +56,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-client
           psql -h localhost -U user -d postgres -c "CREATE DATABASE aimo_network;"
+          psql -h localhost -U user -d postgres -c "CREATE DATABASE aimo_registry;"
           psql -h localhost -U user -d postgres -c "CREATE DATABASE aimo_buyer;"
           psql -h localhost -U user -d postgres -c "CREATE DATABASE aimo_supplier;"
 
@@ -65,6 +71,10 @@ jobs:
 
       - name: Run network-api migrations
         working-directory: aimo-brain-starter/apps/network-api
+        run: uv run --project ../.. alembic -c alembic.ini upgrade head
+
+      - name: Run registry-api migrations
+        working-directory: aimo-brain-starter/apps/registry-api
         run: uv run --project ../.. alembic -c alembic.ini upgrade head
 
       - name: Run buyer-agent migrations
@@ -109,7 +119,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        agent: [buyer-agent, supplier-agent]
+        agent: [buyer-agent, supplier-agent, registry-api]
     steps:
       - uses: actions/checkout@v4
 

@@ -7,7 +7,7 @@
 # before being relied on for a Railway deployment.
 FROM python:3.12-slim AS base
 
-RUN pip install --no-cache-dir uv==0.4.20
+RUN pip install --no-cache-dir uv==0.10.9
 
 WORKDIR /workspace
 
@@ -15,6 +15,7 @@ COPY pyproject.toml uv.lock ./
 COPY apps/buyer-agent ./apps/buyer-agent
 COPY apps/supplier-agent ./apps/supplier-agent
 COPY apps/network-api ./apps/network-api
+COPY apps/registry-api ./apps/registry-api
 COPY apps/worker ./apps/worker
 COPY packages ./packages
 COPY industries ./industries

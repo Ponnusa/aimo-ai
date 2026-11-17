@@ -19,7 +19,7 @@ from a2a.server.routes import (
 )
 from a2a.server.tasks import DatabaseTaskStore
 from agent_runtime import get_llm_adapter
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -91,6 +91,26 @@ def create_app() -> FastAPI:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         return ReadyOut(status="ok", service="supplier-agent", database="reachable")
+
+    # --- Registry endpoint-ownership verification (M2) -----------------
+    # registry-api issues this agent's operator a one-time challenge
+    # value; the operator (here, this same process, acting as its own
+    # operator) must expose it at this well-known path before registry-api
+    # will mark the agent "active". This is NOT agent-to-agent
+    # communication — it is the agent's own operator configuring their own
+    # server, the same way domain-validated TLS certificates work.
+    app.state.ownership_challenge = None
+
+    @app.put("/internal/ownership-challenge")
+    async def set_ownership_challenge(body: dict[str, str]) -> dict[str, str]:
+        app.state.ownership_challenge = body["challenge"]
+        return {"status": "ok"}
+
+    @app.get("/.well-known/aimo-brain-challenge")
+    async def serve_ownership_challenge() -> Response:
+        if app.state.ownership_challenge is None:
+            return Response(status_code=404)
+        return Response(content=app.state.ownership_challenge, media_type="text/plain")
 
     return app
 
