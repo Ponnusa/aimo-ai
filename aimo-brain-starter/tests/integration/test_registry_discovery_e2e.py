@@ -29,6 +29,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from database import new_engine
+from identity import issue_service_credential
 
 from .a2a_server_harness import find_free_port, running_server
 
@@ -93,7 +94,33 @@ def _build_registry_app(*, database_url: str, network_api_url: str):
     )
 
 
-def _build_supplier_app(*, a2a_url: str, database_url: str):
+def _build_supplier_mcp_app(*, database_url: str):
+    import supplier_mcp.app as supplier_mcp_app_module
+    import supplier_mcp.settings as supplier_mcp_settings_module
+    from supplier_mcp.models import SupplierMcpToolInvocationRecord
+
+    os.environ["SUPPLIER_MCP_DATABASE_URL"] = database_url
+    os.environ["SUPPLIER_MCP_ORGANIZATION_ID"] = SUPPLIER_ORG
+    os.environ["SERVICE_CREDENTIAL_SIGNING_SECRET"] = SIGNING_SECRET
+    supplier_mcp_settings_module.get_settings.cache_clear()
+
+    return supplier_mcp_app_module.create_app(), SupplierMcpToolInvocationRecord
+
+
+def _build_buyer_mcp_app(*, database_url: str):
+    import buyer_mcp.app as buyer_mcp_app_module
+    import buyer_mcp.settings as buyer_mcp_settings_module
+    from buyer_mcp.models import BuyerMcpToolInvocationRecord
+
+    os.environ["BUYER_MCP_DATABASE_URL"] = database_url
+    os.environ["BUYER_MCP_ORGANIZATION_ID"] = BUYER_ORG
+    os.environ["SERVICE_CREDENTIAL_SIGNING_SECRET"] = SIGNING_SECRET
+    buyer_mcp_settings_module.get_settings.cache_clear()
+
+    return buyer_mcp_app_module.create_app(), BuyerMcpToolInvocationRecord
+
+
+def _build_supplier_app(*, a2a_url: str, database_url: str, supplier_mcp_url: str):
     import supplier_agent.app as supplier_app_module
     import supplier_agent.settings as supplier_settings_module
     from supplier_agent.models import SupplierTaskRecord
@@ -101,13 +128,17 @@ def _build_supplier_app(*, a2a_url: str, database_url: str):
     os.environ["SUPPLIER_A2A_URL"] = a2a_url
     os.environ["SUPPLIER_DATABASE_URL"] = database_url
     os.environ["SUPPLIER_ORGANIZATION_ID"] = SUPPLIER_ORG
+    os.environ["SUPPLIER_MCP_URL"] = supplier_mcp_url
+    os.environ["SUPPLIER_MCP_SERVICE_CREDENTIAL"] = issue_service_credential(
+        organization_id=SUPPLIER_ORG, scope="use_supplier_tools", signing_secret=SIGNING_SECRET
+    )
     supplier_settings_module.get_settings.cache_clear()
 
     app = supplier_app_module.create_app()
     return app, SupplierTaskRecord
 
 
-def _build_buyer_app(*, a2a_url: str, database_url: str, registry_api_url: str):
+def _build_buyer_app(*, a2a_url: str, database_url: str, registry_api_url: str, buyer_mcp_url: str):
     import buyer_agent.app as buyer_app_module
     import buyer_agent.settings as buyer_settings_module
     from buyer_agent.models import BuyerTaskRecord
@@ -116,6 +147,10 @@ def _build_buyer_app(*, a2a_url: str, database_url: str, registry_api_url: str):
     os.environ["BUYER_DATABASE_URL"] = database_url
     os.environ["BUYER_ORGANIZATION_ID"] = BUYER_ORG
     os.environ["REGISTRY_API_URL"] = registry_api_url
+    os.environ["BUYER_MCP_URL"] = buyer_mcp_url
+    os.environ["BUYER_MCP_SERVICE_CREDENTIAL"] = issue_service_credential(
+        organization_id=BUYER_ORG, scope="use_buyer_tools", signing_secret=SIGNING_SECRET
+    )
     buyer_settings_module.get_settings.cache_clear()
 
     app = buyer_app_module.create_app()
@@ -147,17 +182,29 @@ async def network_server():
 
 @pytest.fixture
 async def supplier_server():
-    port = find_free_port()
-    a2a_url = f"http://127.0.0.1:{port}"
-    database_url = _fresh_sqlite_url("supplier")
-    app, model = _build_supplier_app(a2a_url=a2a_url, database_url=database_url)
+    mcp_database_url = _fresh_sqlite_url("supplier_mcp")
+    mcp_app, mcp_model = _build_supplier_mcp_app(database_url=mcp_database_url)
+    mcp_engine = new_engine(mcp_database_url)
+    await _create_tables(mcp_engine, mcp_model)
+    await mcp_engine.dispose()
 
-    engine = new_engine(database_url)
-    await _create_tables(engine, model)
-    await engine.dispose()
+    mcp_port = find_free_port()
+    with running_server(mcp_app, port=mcp_port) as mcp_server:
+        port = find_free_port()
+        a2a_url = f"http://127.0.0.1:{port}"
+        database_url = _fresh_sqlite_url("supplier")
+        app, model = _build_supplier_app(
+            a2a_url=a2a_url,
+            database_url=database_url,
+            supplier_mcp_url=f"{mcp_server.base_url}/mcp",
+        )
 
-    with running_server(app, port=port) as server:
-        yield server
+        engine = new_engine(database_url)
+        await _create_tables(engine, model)
+        await engine.dispose()
+
+        with running_server(app, port=port) as server:
+            yield server
 
 
 @pytest.fixture
@@ -177,19 +224,30 @@ async def registry_server(network_server):
 
 @pytest.fixture
 async def buyer_server(registry_server):
-    port = find_free_port()
-    a2a_url = f"http://127.0.0.1:{port}"
-    database_url = _fresh_sqlite_url("buyer")
-    app, model = _build_buyer_app(
-        a2a_url=a2a_url, database_url=database_url, registry_api_url=registry_server.base_url
-    )
+    mcp_database_url = _fresh_sqlite_url("buyer_mcp")
+    mcp_app, mcp_model = _build_buyer_mcp_app(database_url=mcp_database_url)
+    mcp_engine = new_engine(mcp_database_url)
+    await _create_tables(mcp_engine, mcp_model)
+    await mcp_engine.dispose()
 
-    engine = new_engine(database_url)
-    await _create_tables(engine, model)
-    await engine.dispose()
+    mcp_port = find_free_port()
+    with running_server(mcp_app, port=mcp_port) as mcp_server:
+        port = find_free_port()
+        a2a_url = f"http://127.0.0.1:{port}"
+        database_url = _fresh_sqlite_url("buyer")
+        app, model = _build_buyer_app(
+            a2a_url=a2a_url,
+            database_url=database_url,
+            registry_api_url=registry_server.base_url,
+            buyer_mcp_url=f"{mcp_server.base_url}/mcp",
+        )
 
-    with running_server(app, port=port) as server:
-        yield server
+        engine = new_engine(database_url)
+        await _create_tables(engine, model)
+        await engine.dispose()
+
+        with running_server(app, port=port) as server:
+            yield server
 
 
 async def _mint_credential(network_server, organization_id: str) -> str:

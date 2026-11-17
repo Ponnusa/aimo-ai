@@ -24,10 +24,18 @@ from identity import issue_service_credential
 from network_api.models import OrganizationRecord, TradingRelationshipRecord
 from network_api.settings import get_settings
 
-#: Every service credential minted by this endpoint grants exactly this
-#: one action. A broader "manage anything" scope is deliberately not
-#: offered in M2.
+#: Every service credential minted by this endpoint grants exactly one of
+#: these actions. A broader "manage anything" scope is deliberately not
+#: offered. ``manage_agents`` (M2) authorizes registry-api agent
+#: management; ``use_buyer_tools``/``use_supplier_tools`` (M3) authorize
+#: calling that organization's own MCP tool server only — see
+#: docs/DECISIONS.md ADR-009.
 AGENT_MANAGEMENT_SCOPE = "manage_agents"
+BUYER_TOOLS_SCOPE = "use_buyer_tools"
+SUPPLIER_TOOLS_SCOPE = "use_supplier_tools"
+ALLOWED_SERVICE_CREDENTIAL_SCOPES = frozenset(
+    {AGENT_MANAGEMENT_SCOPE, BUYER_TOOLS_SCOPE, SUPPLIER_TOOLS_SCOPE}
+)
 
 
 class OrganizationOut(BaseModel):
@@ -43,6 +51,7 @@ class HealthOut(BaseModel):
 
 class ServiceCredentialRequest(BaseModel):
     ttl_seconds: int = 3600
+    scope: str = AGENT_MANAGEMENT_SCOPE
 
 
 class ServiceCredentialOut(BaseModel):
@@ -115,13 +124,25 @@ def create_app() -> FastAPI:
         x_admin_key: str | None = Header(default=None),
     ) -> ServiceCredentialOut:
         """Mint a short-lived credential an organization's own operator
-        uses to register/manage its agents with registry-api.
+        uses to authorize one scoped action on that organization's behalf:
+        managing its agents with registry-api (``manage_agents``), or
+        calling its own buyer/supplier MCP tool server
+        (``use_buyer_tools``/``use_supplier_tools``, M3 — see
+        docs/DECISIONS.md ADR-009).
 
         Protected by a shared admin key, not human OIDC — see the field
         docstring on ``network_admin_api_key``. A real deployment replaces
         this with an authenticated organization-admin session before M6.
         """
         _require_admin(x_admin_key, expected=settings.network_admin_api_key)
+        if body.scope not in ALLOWED_SERVICE_CREDENTIAL_SCOPES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unknown scope {body.scope!r}. "
+                    f"Allowed: {sorted(ALLOWED_SERVICE_CREDENTIAL_SCOPES)}."
+                ),
+            )
 
         async with session_factory() as session:
             org = await session.get(OrganizationRecord, organization_id)
@@ -132,14 +153,14 @@ def create_app() -> FastAPI:
 
         token = issue_service_credential(
             organization_id=organization_id,
-            scope=AGENT_MANAGEMENT_SCOPE,
+            scope=body.scope,
             signing_secret=settings.service_credential_signing_secret,
             ttl_seconds=body.ttl_seconds,
         )
         return ServiceCredentialOut(
             token=token,
             organization_id=organization_id,
-            scope=AGENT_MANAGEMENT_SCOPE,
+            scope=body.scope,
             expires_in_seconds=body.ttl_seconds,
         )
 

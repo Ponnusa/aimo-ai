@@ -31,6 +31,8 @@ jobs:
       REGISTRY_DATABASE_URL: postgresql+psycopg://user:password@localhost:5432/aimo_registry
       BUYER_DATABASE_URL: postgresql+psycopg://user:password@localhost:5432/aimo_buyer
       SUPPLIER_DATABASE_URL: postgresql+psycopg://user:password@localhost:5432/aimo_supplier
+      BUYER_MCP_DATABASE_URL: postgresql+psycopg://user:password@localhost:5432/aimo_buyer_mcp
+      SUPPLIER_MCP_DATABASE_URL: postgresql+psycopg://user:password@localhost:5432/aimo_supplier_mcp
       LLM_PROVIDER: fake
       NETWORK_ADMIN_API_KEY: ci-test-admin-key
       NETWORK_INTERNAL_SERVICE_KEY: ci-test-internal-key
@@ -59,6 +61,8 @@ jobs:
           psql -h localhost -U user -d postgres -c "CREATE DATABASE aimo_registry;"
           psql -h localhost -U user -d postgres -c "CREATE DATABASE aimo_buyer;"
           psql -h localhost -U user -d postgres -c "CREATE DATABASE aimo_supplier;"
+          psql -h localhost -U user -d postgres -c "CREATE DATABASE aimo_buyer_mcp;"
+          psql -h localhost -U user -d postgres -c "CREATE DATABASE aimo_supplier_mcp;"
 
       - name: Lint (ruff check)
         run: uv run ruff check .
@@ -83,6 +87,14 @@ jobs:
 
       - name: Run supplier-agent migrations
         working-directory: aimo-brain-starter/apps/supplier-agent
+        run: uv run --project ../.. alembic -c alembic.ini upgrade head
+
+      - name: Run buyer-mcp migrations
+        working-directory: aimo-brain-starter/apps/buyer-mcp
+        run: uv run --project ../.. alembic -c alembic.ini upgrade head
+
+      - name: Run supplier-mcp migrations
+        working-directory: aimo-brain-starter/apps/supplier-mcp
         run: uv run --project ../.. alembic -c alembic.ini upgrade head
 
       - name: Run tests
@@ -119,7 +131,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        agent: [buyer-agent, supplier-agent, registry-api]
+        agent: [buyer-agent, supplier-agent, registry-api, buyer-mcp, supplier-mcp]
     steps:
       - uses: actions/checkout@v4
 

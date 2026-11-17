@@ -19,6 +19,7 @@ from a2a.types import AgentCard, Role, SendMessageRequest, Task, TaskState
 from food_wholesale.availability import build_request, validate_response
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from buyer_agent.mcp_client import fetch_purchasing_context
 from buyer_agent.models import BuyerTaskRecord
 from buyer_agent.registry_client import discover_supplier_via_registry
 from buyer_agent.settings import BuyerAgentSettings
@@ -88,17 +89,26 @@ async def request_product_availability_via_registry(
     session_factory: async_sessionmaker,
     lines: list[dict[str, str]],
 ) -> dict[str, Any]:
-    """Discover the supplier through registry-api (capability-indexed,
-    relationship-gated discovery — see ``buyer_agent.registry_client``),
-    then send/validate exactly as :func:`request_product_availability`
-    does. Registry-api is not involved past the discovery step: the A2A
-    exchange itself is direct, over the official SDK.
+    """Obtain this organization's own purchasing context over MCP (M3 —
+    see ``buyer_agent.mcp_client``), discover the supplier through
+    registry-api (capability-indexed, relationship-gated discovery — see
+    ``buyer_agent.registry_client``), then send/validate exactly as
+    :func:`request_product_availability` does. Neither registry-api nor
+    buyer-mcp is involved past those steps: the A2A exchange itself is
+    direct, over the official SDK.
+
+    This does not block the A2A request on the fetched budget/
+    requirements — gating a request on policy is M4/M5 scope. A
+    buyer-mcp failure is not swallowed either: it propagates as
+    :class:`mcp_integration.McpToolError`.
 
     Raises :class:`RegistryDiscoveryError` (from
     ``buyer_agent.registry_client``) if no discoverable, authorized
     supplier is found; otherwise the same errors as
     :func:`request_product_availability`.
     """
+    await fetch_purchasing_context(settings=settings)
+
     discovered = await discover_supplier_via_registry(
         registry_url=settings.registry_api_url,
         requesting_organization_id=settings.buyer_organization_id,

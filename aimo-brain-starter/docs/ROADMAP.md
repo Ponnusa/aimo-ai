@@ -25,12 +25,13 @@ Milestones are **ordered by dependencies**, not promised calendar dates. Each mi
 - **Done when:** buyer discovers eligible supplier; invalid or revoked relationships fail closed.
 - **Done:** `registry-api` (new, independently deployable service, own database, own Dockerfile/Railway config) owns agent registration, Agent Card fetch/validation over an SSRF-safe transport, capability indexing, endpoint-ownership verification (challenge/response), and lifecycle (pending/active/suspended/revoked). `network-api` owns organization identity, trading relationships, and short-lived scoped service-credential issuance (`packages/identity`, no longer a stub). Buyer discovers the supplier through registry-api (never a hardcoded URL) and then talks to it directly over the official A2A SDK — registry-api never proxies the conversation. Verified end-to-end, over real HTTP across four independently booted servers: discovery without a relationship, a suspended relationship, and a revoked agent each fail closed (return nothing); a malicious `file://` card URL is rejected before any record is stored. See `TASKS.md` M2 section and `docs/DECISIONS.md` ADR-008 for exact verification evidence.
 
-## M3 — MCP and mock business systems
+## M3 — MCP and mock business systems — COMPLETE (2026-11-18)
 
 - Supplier MCP tools: catalogue search, stock, customer pricing, draft order and submit mock order.
 - Buyer MCP tools: requirements, budget and approvals.
 - Tool permissions, timeouts, typed errors and trace propagation.
 - **Done when:** both agents use MCP tools through separate authenticated boundaries; malicious tool calls are denied.
+- **Done:** `buyer-mcp`/`supplier-mcp` (new, independently deployable services, own databases, own Dockerfiles/Railway configs) expose each organization's business tools over the official MCP SDK's Streamable HTTP transport. Authorization reuses M2's network-api-issued scoped service credentials (new `use_buyer_tools`/`use_supplier_tools` scopes); a buyer-scoped credential cannot call supplier-mcp and vice versa. Neither agent imports a tool implementation directly anymore — `supplier_agent.a2a_executor` now sources catalogue/inventory/price data over MCP, and `buyer_agent.client` fetches purchasing context over MCP before every registry-mediated request. All required security cases (unauthorized, cross-tenant, invalid parameters, expired credential, server unavailable, malicious/malformed response) verified over real HTTP. See `TASKS.md` M3 section and `docs/DECISIONS.md` ADR-009 for exact verification evidence.
 
 ## M4 — Negotiation and durable trade protocol
 

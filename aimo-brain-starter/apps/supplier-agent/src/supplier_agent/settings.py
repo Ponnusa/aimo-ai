@@ -37,6 +37,21 @@ class SupplierAgentSettings(ServiceSettings):
         validation_alias="SUPPLIER_A2A_URL",
     )
 
+    # M3: supplier-mcp — catalogue/inventory/pricing tools over the
+    # official MCP SDK. The credential is a pre-minted, scoped
+    # "use_supplier_tools" service credential (see network-api's
+    # /organizations/{id}/service-credentials), provided to this agent's
+    # operator out of band — the agent never holds the admin key needed
+    # to mint one itself.
+    supplier_mcp_url: str = Field(
+        default="http://localhost:8005/mcp",
+        validation_alias="SUPPLIER_MCP_URL",
+    )
+    supplier_mcp_service_credential: str = Field(
+        default="",
+        validation_alias="SUPPLIER_MCP_SERVICE_CREDENTIAL",
+    )
+
 
 @lru_cache
 def get_settings() -> SupplierAgentSettings:

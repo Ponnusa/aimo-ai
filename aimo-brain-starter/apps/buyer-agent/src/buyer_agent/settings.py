@@ -45,6 +45,21 @@ class BuyerAgentSettings(ServiceSettings):
         validation_alias="REGISTRY_API_URL",
     )
 
+    # M3: buyer-mcp — purchasing-requirements/budget/approval tools over
+    # the official MCP SDK. The credential is a pre-minted, scoped
+    # "use_buyer_tools" service credential (see network-api's
+    # /organizations/{id}/service-credentials), provided to this agent's
+    # operator out of band — the agent never holds the admin key needed
+    # to mint one itself.
+    buyer_mcp_url: str = Field(
+        default="http://localhost:8004/mcp",
+        validation_alias="BUYER_MCP_URL",
+    )
+    buyer_mcp_service_credential: str = Field(
+        default="",
+        validation_alias="BUYER_MCP_SERVICE_CREDENTIAL",
+    )
+
 
 @lru_cache
 def get_settings() -> BuyerAgentSettings:

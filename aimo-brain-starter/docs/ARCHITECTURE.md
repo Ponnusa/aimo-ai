@@ -11,6 +11,14 @@ lifecycle). They never share a database; registry-api's only
 cross-service call is a read-only, internal-service-key-authenticated
 relationship lookup against network-api's own HTTP API.
 
+As of M3 (see `docs/DECISIONS.md` ADR-009), each agent's business tools
+(catalogue/inventory/pricing for supplier; purchase requirements/budget
+for buyer) are served by their own independently deployable MCP server —
+`buyer-mcp`/`supplier-mcp` — over the official MCP SDK's Streamable HTTP
+transport. Each agent calls only its own organization's MCP server,
+authenticated with a network-api-issued scoped service credential; no
+agent imports a tool implementation directly.
+
 ```mermaid
 flowchart TB
   P[Next.js Management Portal] --> N[Network API]
@@ -24,8 +32,10 @@ flowchart TB
   B <-->|Authenticated A2A tasks and artifacts| S
   B --> BP[Buyer Policy Service / OPA]
   S --> SP[Supplier Policy Service / OPA]
-  B --> BM[Buyer MCP Tools]
-  S --> SM[Supplier MCP Tools]
+  B -->|MCP over Streamable HTTP, scoped credential| BM[Buyer MCP Server]
+  S -->|MCP over Streamable HTTP, scoped credential| SM[Supplier MCP Server]
+  BM --> BMD[(Buyer MCP Neon DB)]
+  SM --> SMD[(Supplier MCP Neon DB)]
   BM --> BE[Buyer ERP / Mock]
   SM --> SE[Supplier ERP / Mock]
   B --> BD[(Buyer private state)]
@@ -38,8 +48,10 @@ In a managed environment, separate Neon databases or rigorously isolated schemas
 
 - `apps/network-api`: organization identities, organization-level trading relationships, short-lived organization-scoped service-credential issuance, public protocol schemas.
 - `apps/registry-api`: agent registration, Agent Card fetch/validation (SSRF-safe), capability indexing, endpoint-ownership verification, agent lifecycle (pending/active/suspended/revoked), capability-indexed discovery (gated by a trading relationship looked up from network-api), registry audit trail. Never proxies an A2A conversation — discovery returns the real A2A endpoint URL, and agents talk to each other directly.
-- `apps/buyer-agent`: independent A2A endpoint, LangGraph workflow, buyer MCP client, buyer policy client and private state.
-- `apps/supplier-agent`: independent A2A endpoint, LangGraph workflow, supplier MCP client, supplier policy client and private state.
+- `apps/buyer-agent`: independent A2A endpoint, LangGraph workflow, buyer MCP client (calls `apps/buyer-mcp` only), buyer policy client and private state.
+- `apps/supplier-agent`: independent A2A endpoint, LangGraph workflow, supplier MCP client (calls `apps/supplier-mcp` only), supplier policy client and private state.
+- `apps/buyer-mcp`: buyer organization's own MCP tool server (purchase requirements, budget, approved suppliers, purchase approval — a mock decision, not OPA). Independently deployable; own database (tool-invocation audit log); scoped-credential-authenticated; never serves any other organization.
+- `apps/supplier-mcp`: supplier organization's own MCP tool server (catalogue search, inventory, customer price, delivery options). Independently deployable; own database (tool-invocation audit log); scoped-credential-authenticated; never serves any other organization.
 - `apps/worker`: retry, timeout, inbox/outbox dispatch and reconciliation.
 - `apps/portal`: Next.js management UI; Vercel.
 - `services/opa`: isolated policy decisions; separate bundles and scopes per organization.
@@ -54,6 +66,8 @@ aimo-brain/
     registry-api/
     buyer-agent/
     supplier-agent/
+    buyer-mcp/
+    supplier-mcp/
     worker/
     portal/
   packages/
@@ -87,6 +101,8 @@ aimo-brain/
 **Network database (network-api):** organizations, trading relationships, trust status, policy metadata, approval references.
 
 **Registry database (registry-api):** agents, endpoint-verification challenges and status, indexed capabilities, registry audit trail. Deliberately does not store organization records or relationships — those are network-api's, looked up over HTTP, never joined.
+
+**Buyer/supplier MCP databases (buyer-mcp/supplier-mcp):** each stores only its own tool-invocation audit log. Catalogue/stock/pricing/budget data itself is fictional mock data in `industries/food-wholesale`, not persisted by the MCP server — a real deployment would source it from the organization's own ERP/pricing system instead.
 
 **Agent-owned databases:** task/checkpoint state, private prompts and tool results where permitted, inbox/outbox, quotes/agreements, approval evidence, external order references and audit. Prefer separate DB roles and encryption boundaries. Supplier ERP remains authoritative for stock, prices and orders; never treat a cached snapshot as authoritative at commit time.
 

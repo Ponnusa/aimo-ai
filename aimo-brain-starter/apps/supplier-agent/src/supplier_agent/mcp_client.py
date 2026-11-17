@@ -1,0 +1,94 @@
+"""Supplier-side MCP tool client (M3).
+
+This is the only place in ``supplier_agent`` that touches catalogue,
+inventory or pricing data — it calls ``supplier-mcp`` over the official
+MCP SDK's Streamable HTTP transport (via ``mcp_integration``) rather than
+importing ``food_wholesale.adapters.mock`` directly, per CLAUDE.md's "use
+the official MCP SDK for agent-to-tool integration" and the M3 technical
+requirement that agents use MCP clients, not direct tool imports.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from mcp_integration import McpMalformedResponseError, call_tool
+
+from supplier_agent.settings import SupplierAgentSettings
+
+
+async def fetch_availability_matches(
+    *, settings: SupplierAgentSettings, lines: list[dict[str, Any]], buyer_organization_id: str
+) -> dict[str, list[dict[str, Any]]]:
+    """For each requested line's ``product_query``, search the catalogue,
+    then enrich each match with live inventory and this buyer's
+    customer-specific price, over MCP.
+
+    Returns ``{product_query: [enriched_line, ...]}``. Propagates
+    :class:`mcp_integration.McpToolError` subclasses on any tool-call
+    failure — callers (the AgentExecutor) turn that into a failed A2A
+    task, never a silent empty result.
+    """
+    matches_by_query: dict[str, list[dict[str, Any]]] = {}
+    for line in lines:
+        query = line["product_query"]
+        catalogue_result = await call_tool(
+            server_url=settings.supplier_mcp_url,
+            token=settings.supplier_mcp_service_credential,
+            tool_name="search_catalogue",
+            arguments={"query": query},
+        )
+        catalogue_matches = (catalogue_result or {}).get("result", [])
+
+        try:
+            enriched: list[dict[str, Any]] = []
+            for match in catalogue_matches:
+                product_ref = match["product_ref"]
+                inventory = (
+                    await call_tool(
+                        server_url=settings.supplier_mcp_url,
+                        token=settings.supplier_mcp_service_credential,
+                        tool_name="check_inventory",
+                        arguments={"product_ref": product_ref},
+                    )
+                    or {}
+                )
+                price = (
+                    await call_tool(
+                        server_url=settings.supplier_mcp_url,
+                        token=settings.supplier_mcp_service_credential,
+                        tool_name="get_customer_price",
+                        arguments={
+                            "product_ref": product_ref,
+                            "buyer_organization_id": buyer_organization_id,
+                        },
+                    )
+                    or {}
+                )
+                enriched.append(
+                    {
+                        "product_ref": product_ref,
+                        "name": match["name"],
+                        "unit": match["unit"],
+                        "unit_price": price["unit_price"]
+                        if price["found"]
+                        else match["unit_price"],
+                        "stock_today": inventory["stock_today"]
+                        if inventory["found"]
+                        else match["stock_today"],
+                        "stock_tomorrow": inventory["stock_tomorrow"]
+                        if inventory["found"]
+                        else match["stock_tomorrow"],
+                    }
+                )
+        except (KeyError, TypeError) as exc:
+            # A tool response missing an expected field, or of the wrong
+            # shape entirely — whether from a bug or a compromised/
+            # malicious MCP server — must surface as a clear, typed
+            # failure, never an opaque crash or a silently-wrong result.
+            raise McpMalformedResponseError(
+                f"Malformed response from supplier-mcp while resolving {query!r}: {exc}"
+            ) from exc
+        matches_by_query[query] = enriched
+
+    return matches_by_query

@@ -83,6 +83,43 @@ async def test_issued_credential_verifies_and_scopes_to_the_org() -> None:
 
 
 @pytest.mark.asyncio
+async def test_issuing_credential_with_buyer_tools_scope() -> None:
+    app, engine, settings = await _fresh_app_with_orgs("org_fictional_bistro_01")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/organizations/org_fictional_bistro_01/service-credentials",
+            json={"scope": "use_buyer_tools"},
+            headers={"X-Admin-Key": settings.network_admin_api_key},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scope"] == "use_buyer_tools"
+
+    claims = verify_service_credential(
+        body["token"],
+        signing_secret=settings.service_credential_signing_secret,
+        required_scope="use_buyer_tools",
+    )
+    assert claims.organization_id == "org_fictional_bistro_01"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_issuing_credential_with_unknown_scope_is_rejected() -> None:
+    app, engine, settings = await _fresh_app_with_orgs("org_fictional_bistro_01")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/organizations/org_fictional_bistro_01/service-credentials",
+            json={"scope": "delete_everything"},
+            headers={"X-Admin-Key": settings.network_admin_api_key},
+        )
+    assert response.status_code == 400
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_relationship_lifecycle_and_internal_lookup() -> None:
     app, engine, settings = await _fresh_app_with_orgs(
         "org_fictional_bistro_01", "org_fictional_wholesale_01"

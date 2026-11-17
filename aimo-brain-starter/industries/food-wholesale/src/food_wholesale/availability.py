@@ -89,6 +89,45 @@ def handle_request(
     return response
 
 
+def assemble_response_from_matches(
+    payload: dict[str, Any],
+    *,
+    supplier_organization_id: str,
+    matches_by_query: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Build and validate a ``product_availability_response`` from
+    already-fetched match data, keyed by ``product_query``.
+
+    Unlike :func:`handle_request`, this never touches a catalogue/stock
+    adapter itself — callers (``supplier_agent.mcp_client``) are expected
+    to have sourced ``matches_by_query`` over MCP. This is the schema-only
+    half of :func:`handle_request`, split out so the MCP-sourced path and
+    the direct-mock path share identical envelope/validation logic.
+    """
+    validate_against_schema("product_availability_request", payload)
+
+    results: list[dict[str, Any]] = []
+    for line in payload["lines"]:
+        matches = matches_by_query.get(line["product_query"], [])
+        results.append(
+            {
+                "product_query": line["product_query"],
+                "matched": bool(matches),
+                "lines": matches,
+            }
+        )
+
+    response: dict[str, Any] = {
+        "schema": f"{_SCHEMA_BASE}/product_availability_response/v0.1",
+        "type": "product_availability_response",
+        "version": 1,
+        "supplier_organization_id": supplier_organization_id,
+        "results": results,
+    }
+    validate_against_schema("product_availability_response", response)
+    return response
+
+
 def validate_response(payload: dict[str, Any]) -> None:
     """Raise ``jsonschema.ValidationError`` if ``payload`` is not a valid
     ``product_availability_response``. Used by the buyer side to validate

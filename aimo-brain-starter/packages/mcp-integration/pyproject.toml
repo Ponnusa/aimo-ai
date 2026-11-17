@@ -1,10 +1,12 @@
 [project]
 name = "mcp-integration"
 version = "0.1.0"
-description = "Thin wrapper around the official MCP Python SDK for scoped, authenticated agent tool calls. Scaffolded in M0; wired to the real SDK starting M3."
+description = "Thin, domain-agnostic wrapper around the official MCP Python SDK for scoped, authenticated, bounded-retry tool calls over Streamable HTTP."
 requires-python = ">=3.12"
 dependencies = [
-  "pydantic>=2.9.0",
+  "mcp==1.30.0",
+  "httpx>=0.27.2",
+  "identity",
 ]
 
 [build-system]

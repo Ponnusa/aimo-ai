@@ -1,0 +1,15 @@
+# Railway service config for supplier-mcp.
+#
+# NOT deployed or verified against a real Railway account in this
+# session (no Railway credentials available). This documents the
+# intended independent-service shape: its own Dockerfile, its own build
+# context, its own env vars (SUPPLIER_MCP_DATABASE_URL,
+# SERVICE_CREDENTIAL_SIGNING_SECRET, SUPPLIER_MCP_ORGANIZATION_ID) set
+# directly in this Railway service.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "apps/supplier-mcp/Dockerfile"
+
+[deploy]
+startCommand = "uv run --project . uvicorn supplier_mcp.app:app --host 0.0.0.0 --port 8005"
+healthcheckPath = "/health"

@@ -14,6 +14,8 @@ COPY apps/buyer-agent ./apps/buyer-agent
 COPY apps/supplier-agent ./apps/supplier-agent
 COPY apps/network-api ./apps/network-api
 COPY apps/registry-api ./apps/registry-api
+COPY apps/buyer-mcp ./apps/buyer-mcp
+COPY apps/supplier-mcp ./apps/supplier-mcp
 COPY apps/worker ./apps/worker
 COPY packages ./packages
 COPY industries ./industries

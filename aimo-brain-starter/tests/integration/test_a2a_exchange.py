@@ -20,8 +20,11 @@ from a2a.client import A2ACardResolver
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from database import new_engine
+from identity import issue_service_credential
 
 from .a2a_server_harness import find_free_port, running_server
+
+_SIGNING_SECRET = "test-signing-secret"
 
 
 def _fresh_sqlite_url(label: str) -> str:
@@ -36,13 +39,31 @@ async def _create_tables(engine, model) -> None:
         await conn.run_sync(Base.metadata.create_all, tables=[model.__table__])
 
 
-def _build_supplier_app(*, a2a_url: str, database_url: str):
+def _build_supplier_mcp_app(*, organization_id: str, database_url: str):
+    import supplier_mcp.app as supplier_mcp_app_module
+    import supplier_mcp.settings as supplier_mcp_settings_module
+
+    os.environ["SUPPLIER_MCP_DATABASE_URL"] = database_url
+    os.environ["SUPPLIER_MCP_ORGANIZATION_ID"] = organization_id
+    os.environ["SERVICE_CREDENTIAL_SIGNING_SECRET"] = _SIGNING_SECRET
+    supplier_mcp_settings_module.get_settings.cache_clear()
+
+    return supplier_mcp_app_module.create_app()
+
+
+def _build_supplier_app(*, a2a_url: str, database_url: str, supplier_mcp_url: str):
     import supplier_agent.app as supplier_app_module
     import supplier_agent.settings as supplier_settings_module
     from supplier_agent.models import SupplierTaskRecord
 
     os.environ["SUPPLIER_A2A_URL"] = a2a_url
     os.environ["SUPPLIER_DATABASE_URL"] = database_url
+    os.environ["SUPPLIER_MCP_URL"] = supplier_mcp_url
+    os.environ["SUPPLIER_MCP_SERVICE_CREDENTIAL"] = issue_service_credential(
+        organization_id=os.environ.get("SUPPLIER_ORGANIZATION_ID", "org_fictional_wholesale_01"),
+        scope="use_supplier_tools",
+        signing_secret=_SIGNING_SECRET,
+    )
     supplier_settings_module.get_settings.cache_clear()
 
     app = supplier_app_module.create_app()
@@ -65,17 +86,33 @@ def _build_buyer_app(*, a2a_url: str, database_url: str, supplier_a2a_url: str):
 
 @pytest.fixture
 async def supplier_server():
-    port = find_free_port()
-    a2a_url = f"http://127.0.0.1:{port}"
-    database_url = _fresh_sqlite_url("supplier")
-    app, model = _build_supplier_app(a2a_url=a2a_url, database_url=database_url)
+    mcp_port = find_free_port()
+    mcp_url = f"http://127.0.0.1:{mcp_port}/mcp"
+    mcp_database_url = _fresh_sqlite_url("supplier_mcp")
+    mcp_app = _build_supplier_mcp_app(
+        organization_id="org_fictional_wholesale_01", database_url=mcp_database_url
+    )
 
-    engine = new_engine(database_url)
-    await _create_tables(engine, model)
-    await engine.dispose()
+    from supplier_mcp.models import SupplierMcpToolInvocationRecord
 
-    with running_server(app, port=port) as server:
-        yield server, database_url
+    mcp_engine = new_engine(mcp_database_url)
+    await _create_tables(mcp_engine, SupplierMcpToolInvocationRecord)
+    await mcp_engine.dispose()
+
+    with running_server(mcp_app, port=mcp_port):
+        port = find_free_port()
+        a2a_url = f"http://127.0.0.1:{port}"
+        database_url = _fresh_sqlite_url("supplier")
+        app, model = _build_supplier_app(
+            a2a_url=a2a_url, database_url=database_url, supplier_mcp_url=mcp_url
+        )
+
+        engine = new_engine(database_url)
+        await _create_tables(engine, model)
+        await engine.dispose()
+
+        with running_server(app, port=port) as server:
+            yield server, database_url
 
 
 @pytest.fixture
