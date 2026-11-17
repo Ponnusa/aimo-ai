@@ -92,23 +92,25 @@ async def _fresh_app():
     return create_app(), settings
 
 
-def _token(organization_id: str, *, scope: str = "use_supplier_tools", **kwargs) -> str:
+def _token(
+    organization_id: str, *, signing_secret: str, scope: str = "use_supplier_tools", **kwargs
+) -> str:
     return issue_service_credential(
         organization_id=organization_id,
         scope=scope,
-        signing_secret="test-signing-secret",
+        signing_secret=signing_secret,
         **kwargs,
     )
 
 
 @pytest.mark.asyncio
 async def test_search_catalogue_finds_fictional_milk() -> None:
-    app, _settings = await _fresh_app()
+    app, settings = await _fresh_app()
     port = find_free_port()
     with running_server(app, port=port):
         result = await call_tool(
             server_url=f"http://127.0.0.1:{port}/mcp",
-            token=_token(ORG),
+            token=_token(ORG, signing_secret=settings.service_credential_signing_secret),
             tool_name="search_catalogue",
             arguments={"query": "lactose-free milk"},
         )
@@ -118,12 +120,12 @@ async def test_search_catalogue_finds_fictional_milk() -> None:
 
 @pytest.mark.asyncio
 async def test_check_inventory_known_product() -> None:
-    app, _settings = await _fresh_app()
+    app, settings = await _fresh_app()
     port = find_free_port()
     with running_server(app, port=port):
         result = await call_tool(
             server_url=f"http://127.0.0.1:{port}/mcp",
-            token=_token(ORG),
+            token=_token(ORG, signing_secret=settings.service_credential_signing_secret),
             tool_name="check_inventory",
             arguments={"product_ref": MILK_REF},
         )
@@ -133,12 +135,12 @@ async def test_check_inventory_known_product() -> None:
 
 @pytest.mark.asyncio
 async def test_check_inventory_unknown_product() -> None:
-    app, _settings = await _fresh_app()
+    app, settings = await _fresh_app()
     port = find_free_port()
     with running_server(app, port=port):
         result = await call_tool(
             server_url=f"http://127.0.0.1:{port}/mcp",
-            token=_token(ORG),
+            token=_token(ORG, signing_secret=settings.service_credential_signing_secret),
             tool_name="check_inventory",
             arguments={"product_ref": "sku_does_not_exist"},
         )
@@ -147,12 +149,12 @@ async def test_check_inventory_unknown_product() -> None:
 
 @pytest.mark.asyncio
 async def test_get_customer_price_applies_discount() -> None:
-    app, _settings = await _fresh_app()
+    app, settings = await _fresh_app()
     port = find_free_port()
     with running_server(app, port=port):
         result = await call_tool(
             server_url=f"http://127.0.0.1:{port}/mcp",
-            token=_token(ORG),
+            token=_token(ORG, signing_secret=settings.service_credential_signing_secret),
             tool_name="get_customer_price",
             arguments={
                 "product_ref": MILK_REF,
@@ -165,12 +167,12 @@ async def test_get_customer_price_applies_discount() -> None:
 
 @pytest.mark.asyncio
 async def test_get_delivery_options_known_product() -> None:
-    app, _settings = await _fresh_app()
+    app, settings = await _fresh_app()
     port = find_free_port()
     with running_server(app, port=port):
         result = await call_tool(
             server_url=f"http://127.0.0.1:{port}/mcp",
-            token=_token(ORG),
+            token=_token(ORG, signing_secret=settings.service_credential_signing_secret),
             tool_name="get_delivery_options",
             arguments={"product_ref": MILK_REF, "quantity": "10"},
         )
@@ -195,12 +197,16 @@ async def test_buyer_scoped_credential_cannot_call_supplier_tools() -> None:
     """Cross-tenant/cross-role rejection: a credential minted for the
     buyer org's own tools must not work here, even if replayed at the
     right organization id — the scope itself differs."""
-    app, _settings = await _fresh_app()
+    app, settings = await _fresh_app()
     port = find_free_port()
     with running_server(app, port=port), pytest.raises(McpUnauthorizedError):
         await call_tool(
             server_url=f"http://127.0.0.1:{port}/mcp",
-            token=_token(ORG, scope="use_buyer_tools"),
+            token=_token(
+                ORG,
+                signing_secret=settings.service_credential_signing_secret,
+                scope="use_buyer_tools",
+            ),
             tool_name="search_catalogue",
             arguments={"query": "milk"},
         )
@@ -208,12 +214,12 @@ async def test_buyer_scoped_credential_cannot_call_supplier_tools() -> None:
 
 @pytest.mark.asyncio
 async def test_wrong_organization_credential_is_rejected() -> None:
-    app, _settings = await _fresh_app()
+    app, settings = await _fresh_app()
     port = find_free_port()
     with running_server(app, port=port), pytest.raises(McpUnauthorizedError):
         await call_tool(
             server_url=f"http://127.0.0.1:{port}/mcp",
-            token=_token(OTHER_ORG),
+            token=_token(OTHER_ORG, signing_secret=settings.service_credential_signing_secret),
             tool_name="search_catalogue",
             arguments={"query": "milk"},
         )

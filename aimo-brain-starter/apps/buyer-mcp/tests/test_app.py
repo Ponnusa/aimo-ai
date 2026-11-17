@@ -95,23 +95,25 @@ async def _fresh_app():
     return create_app(), settings
 
 
-def _token(organization_id: str, *, scope: str = "use_buyer_tools", **kwargs) -> str:
+def _token(
+    organization_id: str, *, signing_secret: str, scope: str = "use_buyer_tools", **kwargs
+) -> str:
     return issue_service_credential(
         organization_id=organization_id,
         scope=scope,
-        signing_secret="test-signing-secret",
+        signing_secret=signing_secret,
         **kwargs,
     )
 
 
 @pytest.mark.asyncio
 async def test_get_purchase_requirements_with_valid_credential() -> None:
-    app, _settings = await _fresh_app()
+    app, settings = await _fresh_app()
     port = find_free_port()
     with running_server(app, port=port):
         result = await call_tool(
             server_url=f"http://127.0.0.1:{port}/mcp",
-            token=_token(ORG),
+            token=_token(ORG, signing_secret=settings.service_credential_signing_secret),
             tool_name="get_purchase_requirements",
         )
     assert result is not None
@@ -120,12 +122,12 @@ async def test_get_purchase_requirements_with_valid_credential() -> None:
 
 @pytest.mark.asyncio
 async def test_get_budget_returns_fictional_budget() -> None:
-    app, _settings = await _fresh_app()
+    app, settings = await _fresh_app()
     port = find_free_port()
     with running_server(app, port=port):
         result = await call_tool(
             server_url=f"http://127.0.0.1:{port}/mcp",
-            token=_token(ORG),
+            token=_token(ORG, signing_secret=settings.service_credential_signing_secret),
             tool_name="get_budget",
             arguments={"organization_id": ORG},
         )
@@ -135,12 +137,12 @@ async def test_get_budget_returns_fictional_budget() -> None:
 
 @pytest.mark.asyncio
 async def test_request_purchase_approval_within_budget() -> None:
-    app, _settings = await _fresh_app()
+    app, settings = await _fresh_app()
     port = find_free_port()
     with running_server(app, port=port):
         result = await call_tool(
             server_url=f"http://127.0.0.1:{port}/mcp",
-            token=_token(ORG),
+            token=_token(ORG, signing_secret=settings.service_credential_signing_secret),
             tool_name="request_purchase_approval",
             arguments={"organization_id": ORG, "amount": "100.00", "currency": "EUR"},
         )
@@ -161,35 +163,44 @@ async def test_missing_credential_is_rejected() -> None:
 
 @pytest.mark.asyncio
 async def test_wrong_organization_credential_is_rejected() -> None:
-    app, _settings = await _fresh_app()
+    app, settings = await _fresh_app()
     port = find_free_port()
     with running_server(app, port=port), pytest.raises(McpUnauthorizedError):
         await call_tool(
             server_url=f"http://127.0.0.1:{port}/mcp",
-            token=_token(OTHER_ORG),
+            token=_token(OTHER_ORG, signing_secret=settings.service_credential_signing_secret),
             tool_name="get_purchase_requirements",
         )
 
 
 @pytest.mark.asyncio
 async def test_wrong_scope_credential_is_rejected() -> None:
-    app, _settings = await _fresh_app()
+    app, settings = await _fresh_app()
     port = find_free_port()
     with running_server(app, port=port), pytest.raises(McpUnauthorizedError):
         await call_tool(
             server_url=f"http://127.0.0.1:{port}/mcp",
-            token=_token(ORG, scope="use_supplier_tools"),
+            token=_token(
+                ORG,
+                signing_secret=settings.service_credential_signing_secret,
+                scope="use_supplier_tools",
+            ),
             tool_name="get_purchase_requirements",
         )
 
 
 @pytest.mark.asyncio
 async def test_expired_credential_is_rejected() -> None:
-    app, _settings = await _fresh_app()
+    app, settings = await _fresh_app()
     port = find_free_port()
     with running_server(app, port=port), pytest.raises(McpUnauthorizedError):
         await call_tool(
             server_url=f"http://127.0.0.1:{port}/mcp",
-            token=_token(ORG, ttl_seconds=10, now=1_000_000),
+            token=_token(
+                ORG,
+                signing_secret=settings.service_credential_signing_secret,
+                ttl_seconds=10,
+                now=1_000_000,
+            ),
             tool_name="get_purchase_requirements",
         )
