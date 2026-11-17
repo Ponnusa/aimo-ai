@@ -90,7 +90,13 @@ def test_each_agent_settings_reads_a_distinct_database_env_var() -> None:
     assert 'validation_alias="BUYER_DATABASE_URL"' in buyer_settings
     assert 'validation_alias="SUPPLIER_DATABASE_URL"' in supplier_settings
     assert 'validation_alias="DATABASE_URL"' in network_settings
-    # Each service declares exactly one validation_alias, and it is its own.
-    assert buyer_settings.count("validation_alias=") == 1
-    assert supplier_settings.count("validation_alias=") == 1
-    assert network_settings.count("validation_alias=") == 1
+    # Each service declares exactly one *_DATABASE_URL validation_alias, and
+    # it is its own — never another service's. Non-database settings (own
+    # agent id, own A2A URL, the counterparty's public A2A URL for
+    # discovery) are fine to add; database connection strings are not.
+    import re
+
+    db_alias_pattern = re.compile(r'validation_alias="(\w*DATABASE_URL)"')
+    assert db_alias_pattern.findall(buyer_settings) == ["BUYER_DATABASE_URL"]
+    assert db_alias_pattern.findall(supplier_settings) == ["SUPPLIER_DATABASE_URL"]
+    assert db_alias_pattern.findall(network_settings) == ["DATABASE_URL"]

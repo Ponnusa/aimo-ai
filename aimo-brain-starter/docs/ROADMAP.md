@@ -2,19 +2,21 @@
 
 Milestones are **ordered by dependencies**, not promised calendar dates. Each milestone ends with a repeatable demo, passing automated tests and updated documentation.
 
-## M0 — Clean foundation
+## M0 — Clean foundation — COMPLETE (2026-11-17)
 
 - Create Python workspace (`uv`), Next.js portal shell, Docker Compose dev dependencies and CI.
 - Establish app/package boundaries, environment templates, migrations and test conventions.
 - Provide mock organizations and fake LLM/tool adapters.
 - **Done when:** fresh clone can run checks and local services using documented commands; no production credentials required.
+- **Done:** see `TASKS.md` M0 section and `docs/DECISIONS.md` ADR-004/005/006 for exact verification evidence.
 
-## M1 — Independent A2A agents
+## M1 — Independent A2A agents — COMPLETE (2026-11-18)
 
 - Deploy Buyer and Supplier Agent as separate processes and Docker images.
 - Publish valid Agent Cards; use official A2A SDK for task request/reply.
 - Persist private task state and demonstrate restart recovery.
 - **Done when:** an A2A request/response succeeds across independent services, including restart tests, with no shared private database access.
+- **Done:** both agents run as genuinely separate processes with their own Agent Cards (`a2a-sdk` 1.3.0), exchange a real `product_availability_request`/`product_availability_response` over HTTP (official SDK client/server, no simulated A2A), persist tasks via their own `DatabaseTaskStore` against their own database with proven restart recovery, and pass extended database-isolation contract/security tests. Each agent has its own `Dockerfile` and Railway service config (`infrastructure/railway/*.toml`); the image **build itself was not verified** with `docker build` (Docker is not installed in this environment) — exercise it in CI or locally with Docker before relying on it for a real deployment. See `TASKS.md` M1 section and `docs/DECISIONS.md` ADR-007 for exact verification evidence.
 
 ## M2 — Identity, registry and discovery
 

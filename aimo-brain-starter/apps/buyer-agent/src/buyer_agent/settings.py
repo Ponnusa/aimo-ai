@@ -22,6 +22,25 @@ class BuyerAgentSettings(ServiceSettings):
         validation_alias="BUYER_DATABASE_URL",
     )
 
+    # This agent's own identity and public A2A endpoint. Distinct from the
+    # supplier's equivalents; never read from a shared env var.
+    buyer_agent_id: str = Field(
+        default="agent_fictional_buyer_01",
+        validation_alias="BUYER_AGENT_ID",
+    )
+    buyer_organization_id: str = Field(
+        default="org_fictional_bistro_01",
+        validation_alias="BUYER_ORGANIZATION_ID",
+    )
+    buyer_a2a_url: str = Field(
+        default="http://localhost:8001",
+        validation_alias="BUYER_A2A_URL",
+    )
+    supplier_a2a_url: str = Field(
+        default="http://localhost:8002",
+        validation_alias="SUPPLIER_A2A_URL",
+    )
+
 
 @lru_cache
 def get_settings() -> BuyerAgentSettings:

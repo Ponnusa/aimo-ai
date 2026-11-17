@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aimobrain.example/food-wholesale/product_availability_response/v0.1",
+  "title": "Food Wholesale Product Availability Response",
+  "description": "Supplier's answer to a product_availability_request. Not a quote: no price commitment, validity window or negotiation semantics yet (those belong to the quote artifact, M4).",
+  "type": "object",
+  "required": ["schema", "type", "version", "results"],
+  "properties": {
+    "schema": { "type": "string" },
+    "type": { "const": "product_availability_response" },
+    "version": { "type": "integer", "minimum": 1 },
+    "supplier_organization_id": { "type": "string" },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["product_query", "matched", "lines"],
+        "properties": {
+          "product_query": { "type": "string" },
+          "matched": { "type": "boolean" },
+          "lines": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "product_ref",
+                "name",
+                "unit",
+                "unit_price",
+                "stock_today",
+                "stock_tomorrow"
+              ],
+              "properties": {
+                "product_ref": { "type": "string" },
+                "name": { "type": "string" },
+                "unit": { "type": "string" },
+                "unit_price": {
+                  "type": "string",
+                  "description": "decimal string, never a binary float"
+                },
+                "stock_today": { "type": "string" },
+                "stock_tomorrow": { "type": "string" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

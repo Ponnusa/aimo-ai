@@ -104,3 +104,15 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  docker-build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        agent: [buyer-agent, supplier-agent]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build ${{ matrix.agent }} image
+        working-directory: aimo-brain-starter
+        run: docker build -f apps/${{ matrix.agent }}/Dockerfile -t aimo-${{ matrix.agent }}:ci .

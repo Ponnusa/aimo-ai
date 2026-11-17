@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aimobrain.example/food-wholesale/product_availability_request/v0.1",
+  "title": "Food Wholesale Product Availability Request",
+  "description": "A lighter-weight precursor to a full request_for_quote: 'do you have this, and how much?' without committing to a quote negotiation. Carried as an A2A data Part, never as a native A2A message type.",
+  "type": "object",
+  "required": ["schema", "type", "version", "lines"],
+  "properties": {
+    "schema": { "type": "string" },
+    "type": { "const": "product_availability_request" },
+    "version": { "type": "integer", "minimum": 1 },
+    "buyer_organization_id": { "type": "string" },
+    "lines": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["product_query", "quantity", "unit"],
+        "properties": {
+          "product_query": { "type": "string", "minLength": 1 },
+          "quantity": {
+            "type": "string",
+            "description": "decimal string, never a binary float"
+          },
+          "unit": { "type": "string" }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

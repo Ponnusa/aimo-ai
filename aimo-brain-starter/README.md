@@ -6,7 +6,7 @@ AIMO BRAIN enables agents operated by different organizations to discover one an
 
 ## Current status
 
-**Milestone M0 (clean foundation) is implemented and tested**: the `uv` workspace, independently-bootable `network-api`/`buyer-agent`/`supplier-agent`/`worker` services, shared packages, the `food-wholesale` domain module with mock catalogue/order adapters, a Next.js portal shell, Docker Compose dev dependencies, and CI all exist and pass automated checks — see `TASKS.md` for exact verification evidence. Everything from M1 onward (real A2A communication, registry/trust, MCP tools, negotiation, policy enforcement, portal UI, Valio Aimo integration) is **not yet implemented**; do not assume otherwise. No integration with Valio Aimo or its production systems is implied. Start with simulated data and obtain explicit permission before accessing any third-party systems.
+**Milestones M0 (clean foundation) and M1 (independent A2A agents) are implemented and tested.** M0: the `uv` workspace, independently-bootable `network-api`/`buyer-agent`/`supplier-agent`/`worker` services, shared packages, the `food-wholesale` domain module with mock catalogue/order adapters, a Next.js portal shell, Docker Compose dev dependencies, and CI. M1: buyer-agent and supplier-agent each run as a genuinely separate process with their own official-SDK Agent Card, exchange a real `product_availability_request`/`product_availability_response` over HTTP (the official A2A SDK, never a simulated/direct-call exchange), and persist tasks via their own database-backed task store with proven restart recovery. See `TASKS.md` for exact verification evidence. Everything from M2 onward (registry/trust, MCP tools, negotiation, policy enforcement, portal UI, Valio Aimo integration) is **not yet implemented**; do not assume otherwise. No integration with Valio Aimo or its production systems is implied. Start with simulated data and obtain explicit permission before accessing any third-party systems.
 
 ## First demonstration
 
@@ -44,15 +44,17 @@ AIMO BRAIN enables agents operated by different organizations to discover one an
 2. Read [`PROJECT.md`](PROJECT.md) (scope and acceptance criteria).
 3. Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/PROTOCOLS.md`](docs/PROTOCOLS.md).
 4. Follow [`docs/ROADMAP.md`](docs/ROADMAP.md) and update [`TASKS.md`](TASKS.md) as work progresses.
-5. Begin at **M0**: scaffold, local environment, CI, and an architectural test proving service isolation.
+5. **M0** and **M1** are complete: scaffold, local environment, CI, service-isolation tests, and a real A2A exchange between independent buyer/supplier agents. Continue at **M2** (identity, registry and discovery).
 
-## Local development (M0)
+## Local development (M0 + M1)
 
-M0 is implemented: a `uv` workspace with `network-api`, `buyer-agent`,
+M0 and M1 are implemented: a `uv` workspace with `network-api`, `buyer-agent`,
 `supplier-agent`, `worker`, shared `packages/*`, the `industries/food-wholesale`
 domain module, a Next.js portal shell, Docker Compose dev dependencies and
-CI. Nothing beyond M0 is implemented — in particular, there is **no A2A
-communication between agents yet** (that is M1).
+CI, plus a real official-A2A-SDK exchange between buyer-agent and
+supplier-agent. Nothing beyond M1 is implemented — in particular, there is
+**no registry/discovery beyond a direct Agent Card URL fetch, no MCP
+tools, and no negotiation/policy enforcement yet** (M2+).
 
 ```bash
 # 1. Start local Postgres (3 isolated databases) and Redis
@@ -79,7 +81,16 @@ uv run pytest -v
 # 6. Run a service locally, e.g.
 uv run --project apps/network-api uvicorn network_api.app:app --reload --port 8000
 
-# 7. Portal shell
+# 7. Run both agents and exercise the real A2A exchange
+#    (two separate terminals; env vars shown inline for clarity)
+BUYER_A2A_URL=http://127.0.0.1:8001 SUPPLIER_A2A_URL=http://127.0.0.1:8002 \
+  uv run --project apps/buyer-agent uvicorn buyer_agent.app:app --port 8001
+SUPPLIER_A2A_URL=http://127.0.0.1:8002 \
+  uv run --project apps/supplier-agent uvicorn supplier_agent.app:app --port 8002
+# then, from a third terminal, discover the supplier and send a
+# product_availability_request — see buyer_agent.client.request_product_availability
+
+# 8. Portal shell
 cd apps/portal && npm install && npm run dev
 ```
 

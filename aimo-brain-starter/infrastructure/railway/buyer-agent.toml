@@ -1,0 +1,16 @@
+# Railway service config for buyer-agent.
+#
+# NOT deployed or verified against a real Railway account in this
+# session (no Railway credentials available). This documents the
+# intended independent-service shape: its own Dockerfile, its own build
+# context, its own env vars (BUYER_DATABASE_URL, BUYER_A2A_URL,
+# BUYER_AGENT_ID, BUYER_ORGANIZATION_ID, SUPPLIER_A2A_URL, LLM_PROVIDER)
+# set directly in the Railway service, never shared with supplier-agent's
+# service.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "apps/buyer-agent/Dockerfile"
+
+[deploy]
+startCommand = "uv run --project . uvicorn buyer_agent.app:app --host 0.0.0.0 --port 8001"
+healthcheckPath = "/health"
