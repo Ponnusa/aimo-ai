@@ -11,12 +11,12 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from network_api.models import OrganizationRecord
-from network_api.settings import get_settings
 from pydantic import BaseModel
 from sqlalchemy import select
 
 from database import new_engine, new_session_factory
+from network_api.models import OrganizationRecord
+from network_api.settings import get_settings
 
 
 class OrganizationOut(BaseModel):

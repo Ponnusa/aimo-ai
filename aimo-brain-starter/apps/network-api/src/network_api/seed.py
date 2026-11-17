@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import asyncio
 
+from database import new_engine, new_session_factory
 from network_api.models import OrganizationRecord
 from network_api.settings import get_settings
-
-from database import new_engine, new_session_factory
 
 FICTIONAL_ORGANIZATIONS = [
     OrganizationRecord(
