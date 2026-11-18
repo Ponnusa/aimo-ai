@@ -14,6 +14,8 @@
     "domain",
     "type",
     "version",
+    "proposal_id",
+    "content_hash",
     "created_at",
     "expires_at",
     "payload"
@@ -21,7 +23,10 @@
   "properties": {
     "schema": { "type": "string" },
     "artifact_id": { "type": "string" },
-    "transaction_id": { "type": "string" },
+    "transaction_id": {
+      "type": "string",
+      "description": "Doubles as the stable negotiation ID shared by every proposal in this exchange."
+    },
     "correlation_id": { "type": "string" },
     "sender_agent_id": { "type": "string" },
     "recipient_agent_id": { "type": "string" },
@@ -29,6 +34,15 @@
     "domain": { "const": "food-wholesale" },
     "type": { "const": "quote" },
     "version": { "type": "integer", "minimum": 1 },
+    "proposal_id": { "type": "string" },
+    "supersedes_proposal_id": {
+      "type": ["string", "null"],
+      "description": "The RFQ's or prior counterproposal's proposal_id this quote responds to, if any."
+    },
+    "content_hash": {
+      "type": "string",
+      "description": "sha256 of the canonicalized payload, per trade_protocol.content_hash."
+    },
     "created_at": { "type": "string", "format": "date-time" },
     "expires_at": { "type": "string", "format": "date-time" },
     "payload": {

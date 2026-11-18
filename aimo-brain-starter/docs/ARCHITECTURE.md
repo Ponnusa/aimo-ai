@@ -19,6 +19,16 @@ transport. Each agent calls only its own organization's MCP server,
 authenticated with a network-api-issued scoped service credential; no
 agent imports a tool implementation directly.
 
+As of M4 (see `docs/DECISIONS.md` ADR-010), buyer-agent and
+supplier-agent negotiate a nonbinding RFQ/quote/counterproposal/
+proposed-agreement sequence over the same direct A2A connection used for
+product availability — no new transport or service. Each agent persists
+its own negotiation/proposal history in its own database (own
+migration, no new service); the negotiation state machine reuses M0's
+generic `trade_protocol.TradeState`/`VALID_TRANSITIONS` rather than a
+new one. Nothing in M4 can reach `AUTHORIZED` or later — that remains
+M5 scope, gated on independent OPA policy checks that do not exist yet.
+
 ```mermaid
 flowchart TB
   P[Next.js Management Portal] --> N[Network API]
@@ -48,8 +58,8 @@ In a managed environment, separate Neon databases or rigorously isolated schemas
 
 - `apps/network-api`: organization identities, organization-level trading relationships, short-lived organization-scoped service-credential issuance, public protocol schemas.
 - `apps/registry-api`: agent registration, Agent Card fetch/validation (SSRF-safe), capability indexing, endpoint-ownership verification, agent lifecycle (pending/active/suspended/revoked), capability-indexed discovery (gated by a trading relationship looked up from network-api), registry audit trail. Never proxies an A2A conversation — discovery returns the real A2A endpoint URL, and agents talk to each other directly.
-- `apps/buyer-agent`: independent A2A endpoint, LangGraph workflow, buyer MCP client (calls `apps/buyer-mcp` only), buyer policy client and private state.
-- `apps/supplier-agent`: independent A2A endpoint, LangGraph workflow, supplier MCP client (calls `apps/supplier-mcp` only), supplier policy client and private state.
+- `apps/buyer-agent`: independent A2A endpoint, LangGraph workflow, buyer MCP client (calls `apps/buyer-mcp` only), nonbinding RFQ/counteroffer negotiation (M4, own negotiation/proposal tables), buyer policy client and private state.
+- `apps/supplier-agent`: independent A2A endpoint, LangGraph workflow, supplier MCP client (calls `apps/supplier-mcp` only), nonbinding quote/counteroffer negotiation (M4, own negotiation/proposal tables plus an inbound-artifact replay-dedup cache), supplier policy client and private state.
 - `apps/buyer-mcp`: buyer organization's own MCP tool server (purchase requirements, budget, approved suppliers, purchase approval — a mock decision, not OPA). Independently deployable; own database (tool-invocation audit log); scoped-credential-authenticated; never serves any other organization.
 - `apps/supplier-mcp`: supplier organization's own MCP tool server (catalogue search, inventory, customer price, delivery options). Independently deployable; own database (tool-invocation audit log); scoped-credential-authenticated; never serves any other organization.
 - `apps/worker`: retry, timeout, inbox/outbox dispatch and reconciliation.

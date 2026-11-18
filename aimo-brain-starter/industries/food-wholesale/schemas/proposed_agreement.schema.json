@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aimobrain.example/food-wholesale/proposed_agreement/v0.1",
+  "title": "Food Wholesale Proposed Agreement",
+  "description": "Both parties converged on identical terms. Explicitly NONBINDING: this is not an order, reservation, payment or contract commitment. Actual authorization and commitment are M5 scope.",
+  "type": "object",
+  "required": [
+    "schema",
+    "artifact_id",
+    "transaction_id",
+    "correlation_id",
+    "sender_agent_id",
+    "recipient_agent_id",
+    "organization_id",
+    "domain",
+    "type",
+    "version",
+    "proposal_id",
+    "agreement_of_proposal_id",
+    "content_hash",
+    "created_at",
+    "expires_at",
+    "payload"
+  ],
+  "properties": {
+    "schema": { "type": "string" },
+    "artifact_id": { "type": "string" },
+    "transaction_id": { "type": "string" },
+    "correlation_id": { "type": "string" },
+    "sender_agent_id": { "type": "string" },
+    "recipient_agent_id": { "type": "string" },
+    "organization_id": { "type": "string" },
+    "domain": { "const": "food-wholesale" },
+    "type": { "const": "proposed_agreement" },
+    "version": { "type": "integer", "minimum": 1 },
+    "proposal_id": { "type": "string" },
+    "agreement_of_proposal_id": {
+      "type": "string",
+      "description": "The exact quote/counterproposal proposal_id whose terms both parties converged on."
+    },
+    "content_hash": {
+      "type": "string",
+      "description": "sha256 of the canonicalized payload terms; must equal agreement_of_proposal_id's own recorded content_hash."
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "payload": {
+      "type": "object",
+      "required": ["lines", "currency", "status"],
+      "properties": {
+        "lines": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["product_ref", "quantity", "unit", "unit_price"],
+            "properties": {
+              "product_ref": { "type": "string" },
+              "quantity": { "type": "string" },
+              "unit": { "type": "string" },
+              "unit_price": { "type": "string" }
+            }
+          }
+        },
+        "currency": { "type": "string", "minLength": 3, "maxLength": 3 },
+        "delivery_terms": { "type": "string" },
+        "status": { "const": "NONBINDING" }
+      }
+    }
+  },
+  "additionalProperties": true
+}

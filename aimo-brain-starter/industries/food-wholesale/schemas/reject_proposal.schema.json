@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aimobrain.example/food-wholesale/reject_proposal/v0.1",
+  "title": "Food Wholesale Reject Proposal",
+  "description": "Explicit, terminal rejection or cancellation of a negotiation by either party.",
+  "type": "object",
+  "required": [
+    "schema",
+    "artifact_id",
+    "transaction_id",
+    "correlation_id",
+    "sender_agent_id",
+    "recipient_agent_id",
+    "organization_id",
+    "domain",
+    "type",
+    "version",
+    "proposal_id",
+    "created_at",
+    "expires_at",
+    "payload"
+  ],
+  "properties": {
+    "schema": { "type": "string" },
+    "artifact_id": { "type": "string" },
+    "transaction_id": { "type": "string" },
+    "correlation_id": { "type": "string" },
+    "sender_agent_id": { "type": "string" },
+    "recipient_agent_id": { "type": "string" },
+    "organization_id": { "type": "string" },
+    "domain": { "const": "food-wholesale" },
+    "type": { "const": "reject_proposal" },
+    "version": { "type": "integer", "minimum": 1 },
+    "proposal_id": { "type": "string" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "payload": {
+      "type": "object",
+      "required": ["rejected_proposal_id", "reason"],
+      "properties": {
+        "rejected_proposal_id": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    }
+  },
+  "additionalProperties": true
+}

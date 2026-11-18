@@ -10,6 +10,12 @@ from trade_protocol.entities import (
     Task,
 )
 from trade_protocol.lifecycle import TERMINAL_STATES, VALID_TRANSITIONS, TradeState
+from trade_protocol.negotiation import (
+    NegotiationTransitionError,
+    assert_valid_transition,
+    canonicalize_terms,
+    content_hash,
+)
 
 __all__ = [
     "TERMINAL_STATES",
@@ -19,9 +25,13 @@ __all__ = [
     "Authorization",
     "Capability",
     "Evidence",
+    "NegotiationTransitionError",
     "Organization",
     "Proposal",
     "Relationship",
     "Task",
     "TradeState",
+    "assert_valid_transition",
+    "canonicalize_terms",
+    "content_hash",
 ]

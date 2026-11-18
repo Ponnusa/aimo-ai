@@ -6,7 +6,7 @@ AIMO BRAIN enables agents operated by different organizations to discover one an
 
 ## Current status
 
-**Milestones M0 (clean foundation), M1 (independent A2A agents), M2 (identity, registry and discovery) and M3 (MCP business tool integration) are implemented and tested.** M0: the `uv` workspace, independently-bootable `network-api`/`buyer-agent`/`supplier-agent`/`worker` services, shared packages, the `food-wholesale` domain module with mock catalogue/order adapters, a Next.js portal shell, Docker Compose dev dependencies, and CI. M1: buyer-agent and supplier-agent each run as a genuinely separate process with their own official-SDK Agent Card, exchange a real `product_availability_request`/`product_availability_response` over HTTP (the official A2A SDK, never a simulated/direct-call exchange), and persist tasks via their own database-backed task store with proven restart recovery. M2: a new, independently deployable `registry-api` service handles agent registration, SSRF-safe Agent Card fetch/validation, capability-indexed discovery and endpoint-ownership verification/lifecycle; `network-api` gained trading relationships and short-lived scoped service-credential issuance (`packages/identity`, no longer a stub). The buyer now discovers the supplier through registry-api (never a hardcoded URL) and then talks to it directly over the official A2A SDK. M3: two new, independently deployable `buyer-mcp`/`supplier-mcp` services expose each organization's business tools (purchase requirements/budget/approvals; catalogue/inventory/pricing/delivery) over the official MCP SDK's Streamable HTTP transport, authenticated with network-api-issued scoped service credentials; neither agent imports a tool implementation directly anymore. See `TASKS.md` for exact verification evidence. Everything from M4 onward (negotiation, policy enforcement, portal UI, Valio Aimo integration) is **not yet implemented**; do not assume otherwise. No integration with Valio Aimo or its production systems is implied. Start with simulated data and obtain explicit permission before accessing any third-party systems.
+**Milestones M0 (clean foundation), M1 (independent A2A agents), M2 (identity, registry and discovery), M3 (MCP business tool integration) and M4 (nonbinding negotiation) are implemented and tested.** M0: the `uv` workspace, independently-bootable `network-api`/`buyer-agent`/`supplier-agent`/`worker` services, shared packages, the `food-wholesale` domain module with mock catalogue/order adapters, a Next.js portal shell, Docker Compose dev dependencies, and CI. M1: buyer-agent and supplier-agent each run as a genuinely separate process with their own official-SDK Agent Card, exchange a real `product_availability_request`/`product_availability_response` over HTTP (the official A2A SDK, never a simulated/direct-call exchange), and persist tasks via their own database-backed task store with proven restart recovery. M2: a new, independently deployable `registry-api` service handles agent registration, SSRF-safe Agent Card fetch/validation, capability-indexed discovery and endpoint-ownership verification/lifecycle; `network-api` gained trading relationships and short-lived scoped service-credential issuance (`packages/identity`, no longer a stub). The buyer now discovers the supplier through registry-api (never a hardcoded URL) and then talks to it directly over the official A2A SDK. M3: two new, independently deployable `buyer-mcp`/`supplier-mcp` services expose each organization's business tools (purchase requirements/budget/approvals; catalogue/inventory/pricing/delivery) over the official MCP SDK's Streamable HTTP transport, authenticated with network-api-issued scoped service credentials; neither agent imports a tool implementation directly anymore. M4: buyer-agent and supplier-agent negotiate a versioned, explicitly **NONBINDING** RFQ → quote → counteroffer → proposed-agreement sequence over the same direct A2A connection (no new service); each persists its own negotiation history, reusing M0's generic lifecycle state machine; a buyer whose MCP-sourced budget can't cover a quote sends a real counteroffer, which the supplier evaluates deterministically (never via an LLM) against its own margin floor. See `TASKS.md` for exact verification evidence. Everything from M5 onward (OPA policy enforcement, binding commit, portal UI, Valio Aimo integration) is **not yet implemented**; do not assume otherwise. No integration with Valio Aimo or its production systems is implied. Start with simulated data and obtain explicit permission before accessing any third-party systems.
 
 ## First demonstration
 
@@ -44,22 +44,24 @@ AIMO BRAIN enables agents operated by different organizations to discover one an
 2. Read [`PROJECT.md`](PROJECT.md) (scope and acceptance criteria).
 3. Read [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and [`docs/PROTOCOLS.md`](docs/PROTOCOLS.md).
 4. Follow [`docs/ROADMAP.md`](docs/ROADMAP.md) and update [`TASKS.md`](TASKS.md) as work progresses.
-5. **M0** through **M3** are complete: scaffold, local environment, CI, service-isolation tests, a real A2A exchange between independent buyer/supplier agents, registry-mediated discovery with endpoint-ownership verification, and MCP-based business tool integration for both agents. Continue at **M4** (negotiation and durable trade protocol).
+5. **M0** through **M4** are complete: scaffold, local environment, CI, service-isolation tests, a real A2A exchange between independent buyer/supplier agents, registry-mediated discovery with endpoint-ownership verification, MCP-based business tool integration for both agents, and nonbinding RFQ/quote/counteroffer negotiation to a proposed agreement. Continue at **M5** (independent policies and commitment).
 
-## Local development (M0 + M1 + M2 + M3)
+## Local development (M0 + M1 + M2 + M3 + M4)
 
 A `uv` workspace with `network-api`, `registry-api`, `buyer-agent`,
 `supplier-agent`, `buyer-mcp`, `supplier-mcp`, `worker`, shared `packages/*`,
 the `industries/food-wholesale` domain module, a Next.js portal shell,
 Docker Compose dev dependencies and CI, a real official-A2A-SDK exchange
 between buyer-agent and supplier-agent, registry-mediated discovery
-(registry-api) gated by a trading relationship (network-api) and
-endpoint-ownership verification, and MCP-based business tool integration
+(registry-api) gated by a trading relationship (network-api),
+endpoint-ownership verification, MCP-based business tool integration
 (buyer-mcp/supplier-mcp, official MCP SDK, Streamable HTTP, scoped
-service credentials). Nothing beyond M3 is implemented — in particular,
-there is **no negotiation/quote lifecycle and no OPA policy enforcement
-yet** (M4+), and organization identity itself is still self-declared
-config, not OIDC-verified.
+service credentials), and nonbinding RFQ/quote/counteroffer negotiation
+to a proposed agreement (M4) over that same A2A connection. Nothing
+beyond M4 is implemented — in particular, there is **no OPA policy
+enforcement, human approval or binding commit yet** (M5+), and
+organization identity itself is still self-declared config, not
+OIDC-verified.
 
 ```bash
 # 1. Start local Postgres (6 isolated databases) and Redis
@@ -116,7 +118,12 @@ SUPPLIER_A2A_URL=http://127.0.0.1:8002 \
 #     directly over MCP — see tests/security/test_mcp_tool_security.py
 #     and apps/{buyer,supplier}-mcp/tests/test_app.py for worked examples
 
-# 11. Portal shell
+# 11. Run the full nonbinding negotiation (RFQ -> quote -> counteroffer
+#     -> proposed agreement, explicitly NONBINDING) — see
+#     buyer_agent.client.negotiate_purchase_via_registry and
+#     tests/integration/test_negotiation_e2e.py for the full sequence
+
+# 12. Portal shell
 cd apps/portal && npm install && npm run dev
 ```
 

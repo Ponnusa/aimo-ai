@@ -25,7 +25,7 @@ A2A defines task/message transport. The following are **AIMO application artifac
 }
 ```
 
-This is a **design example**, not a complete canonical schema. Implement JSON Schema, validation, canonicalization and hash rules in M4. Avoid embedding sensitive delivery addresses in public registry metadata.
+This is a **design example**; the implemented food-wholesale schemas (M4, see `docs/DECISIONS.md` ADR-010) are in `industries/food-wholesale/schemas/`: `request_for_quote`, `quote`, `counterproposal`, `accept_proposal`, `reject_proposal`, `proposed_agreement`. Each carries `proposal_id`/`supersedes_proposal_id`/`content_hash` (canonicalization + sha256, via `trade_protocol.negotiation`); `transaction_id` doubles as the stable negotiation ID. Avoid embedding sensitive delivery addresses in public registry metadata.
 
 ## Domain-independent lifecycle
 

@@ -118,12 +118,14 @@ source = { editable = "industries/food-wholesale" }
 dependencies = [
     { name = "jsonschema" },
     { name = "pydantic" },
+    { name = "trade-protocol" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "jsonschema", specifier = ">=4.23.0" },
     { name = "pydantic", specifier = ">=2.9.0" },
+    { name = "trade-protocol", editable = "packages/trade-protocol" },
 ]
 
 [[package]]

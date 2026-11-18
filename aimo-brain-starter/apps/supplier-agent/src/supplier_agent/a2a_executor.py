@@ -2,14 +2,16 @@
 
 This class contains **no** food-wholesale knowledge of its own. It
 unwraps the A2A message into a plain dict, validates it against the
-``food_wholesale`` schema, sources catalogue/inventory/price data by
-calling ``supplier-mcp`` over MCP (``supplier_agent.mcp_client`` —
-never a direct import of ``food_wholesale.adapters.mock``, per M3's
-"agents must use MCP clients, not tool implementations" requirement),
-and asks ``food_wholesale.availability`` to assemble/validate the
-response envelope. If a different industry module were swapped in,
-nothing here would need to change — only the ``skill_id``/domain
-wiring in ``app.py`` would.
+``food_wholesale`` schema, and dispatches by the artifact's ``type``:
+``product_availability_request`` (M1) sources catalogue/inventory/price
+data by calling ``supplier-mcp`` over MCP and asks
+``food_wholesale.availability`` to assemble the response; the M4
+negotiation types (``request_for_quote``, ``counterproposal``,
+``accept_proposal``, ``reject_proposal``) are handled by
+``supplier_agent.negotiation``, which owns all MCP sourcing, persistence
+and state-transition enforcement for those. If a different industry
+module were swapped in, nothing here would need to change — only the
+``skill_id``/domain wiring in ``a2a_card.py`` would.
 """
 
 from __future__ import annotations
@@ -26,13 +28,29 @@ from a2a.types import TaskState
 from food_wholesale.availability import assemble_response_from_matches, validate_against_schema
 from mcp_integration import McpToolError
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from trade_protocol import NegotiationTransitionError
 
+from supplier_agent import negotiation
 from supplier_agent.a2a_card import CHECK_AVAILABILITY_SKILL_ID
 from supplier_agent.mcp_client import fetch_availability_matches
 from supplier_agent.models import SupplierTaskRecord
+from supplier_agent.negotiation_store import (
+    NegotiationExpiredError,
+    NegotiationNotFoundError,
+    StaleProposalReferenceError,
+)
 from supplier_agent.settings import SupplierAgentSettings
 
 logger = logging.getLogger(__name__)
+
+#: Maps an inbound artifact's "type" to the schema it must validate
+#: against and the negotiation handler that processes it (M4).
+_NEGOTIATION_HANDLERS = {
+    "request_for_quote": ("request_for_quote", negotiation.handle_request_for_quote),
+    "counterproposal": ("counterproposal", negotiation.handle_counterproposal),
+    "accept_proposal": ("accept_proposal", negotiation.handle_accept_proposal),
+    "reject_proposal": ("reject_proposal", negotiation.handle_reject_proposal),
+}
 
 
 def _extract_sender_agent_id(context: RequestContext) -> str | None:
@@ -81,22 +99,32 @@ class SupplierAgentExecutor(AgentExecutor):
                 raise DomainHandlerError("No structured data payload provided.")
 
             request_payload = data_parts[0]
-            validate_against_schema("product_availability_request", request_payload)
+            artifact_type = request_payload.get("type")
 
-            matches_by_query = await fetch_availability_matches(
-                settings=self._settings,
-                lines=request_payload["lines"],
-                buyer_organization_id=request_payload["buyer_organization_id"],
-            )
-            response = assemble_response_from_matches(
-                request_payload,
-                supplier_organization_id=self._settings.supplier_organization_id,
-                matches_by_query=matches_by_query,
-            )
+            if artifact_type in _NEGOTIATION_HANDLERS:
+                schema_name, handler = _NEGOTIATION_HANDLERS[artifact_type]
+                validate_against_schema(schema_name, request_payload)
+                response = await handler(
+                    request_payload,
+                    settings=self._settings,
+                    session_factory=self._session_factory,
+                )
+            else:
+                validate_against_schema("product_availability_request", request_payload)
+                matches_by_query = await fetch_availability_matches(
+                    settings=self._settings,
+                    lines=request_payload["lines"],
+                    buyer_organization_id=request_payload["buyer_organization_id"],
+                )
+                response = assemble_response_from_matches(
+                    request_payload,
+                    supplier_organization_id=self._settings.supplier_organization_id,
+                    matches_by_query=matches_by_query,
+                )
         except jsonschema.ValidationError as exc:
             await self._record(task.id, state="FAILED", counterparty_agent_id=counterparty)
             await updater.failed(
-                message=new_text_message(f"Invalid product_availability_request: {exc.message}")
+                message=new_text_message(f"Invalid negotiation artifact: {exc.message}")
             )
             return
         except McpToolError as exc:
@@ -104,6 +132,18 @@ class SupplierAgentExecutor(AgentExecutor):
             await updater.failed(
                 message=new_text_message(f"Could not complete catalogue/pricing lookup: {exc}")
             )
+            return
+        except (
+            NegotiationTransitionError,
+            NegotiationNotFoundError,
+            StaleProposalReferenceError,
+            NegotiationExpiredError,
+            negotiation.ProposalMismatchError,
+            negotiation.UnauthorizedCounterpartyError,
+            negotiation.NegotiationError,
+        ) as exc:
+            await self._record(task.id, state="FAILED", counterparty_agent_id=counterparty)
+            await updater.failed(message=new_text_message(f"Negotiation rejected: {exc}"))
             return
         except DomainHandlerError as exc:
             await self._record(task.id, state="FAILED", counterparty_agent_id=counterparty)

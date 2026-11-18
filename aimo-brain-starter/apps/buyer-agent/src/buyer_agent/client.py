@@ -8,7 +8,9 @@ It uses the official A2A SDK client over real HTTP; it never imports
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -17,10 +19,15 @@ from a2a.client.errors import A2AClientError, AgentCardResolutionError
 from a2a.helpers import get_data_parts, new_data_message
 from a2a.types import AgentCard, Role, SendMessageRequest, Task, TaskState
 from food_wholesale.availability import build_request, validate_response
+from food_wholesale.negotiation import build_accept_proposal, build_counterproposal, build_rfq
+from food_wholesale.schemas import validate_against_schema
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from trade_protocol import TradeState
 
+from buyer_agent import negotiation_store
 from buyer_agent.mcp_client import fetch_purchasing_context
 from buyer_agent.models import BuyerTaskRecord
+from buyer_agent.negotiation import evaluate_quote_against_budget
 from buyer_agent.registry_client import discover_supplier_via_registry
 from buyer_agent.settings import BuyerAgentSettings
 
@@ -28,6 +35,21 @@ from buyer_agent.settings import BuyerAgentSettings
 #: it is the supplier's, kept here only so callers/tests have one source
 #: of truth for which skill is being exercised.
 TARGET_SKILL_ID = "food.check_product_availability"
+
+#: The supplier skill this client negotiates against (M4).
+NEGOTIATE_SKILL_ID = "food.request_quote"
+
+#: Safety bound on negotiation rounds on the buyer's own side, in
+#: addition to the supplier's own round cap
+#: (``food_wholesale.negotiation.MAX_NEGOTIATION_ROUNDS``) — this agent
+#: never loops indefinitely even if that bound were ever misconfigured.
+_MAX_BUYER_ROUNDS = 8
+
+
+class NegotiationFailedError(Exception):
+    """Raised when a negotiation cannot proceed for a reason other than
+    an explicit supplier rejection (e.g. too many rounds without
+    convergence)."""
 
 
 class AgentUnavailableError(Exception):
@@ -176,6 +198,223 @@ async def _send_and_validate(
         ) from exc
 
     return response_payload
+
+
+async def _send_negotiation_artifact(
+    agent_card: AgentCard, artifact: dict[str, Any], *, buyer_agent_id: str
+) -> dict[str, Any]:
+    """Send one negotiation artifact (RFQ, counterproposal, accept/reject)
+    over a real A2A task and return the supplier's structured response
+    payload, unvalidated — callers check ``response["type"]`` and
+    validate against the matching schema themselves, since the response
+    type varies by negotiation state."""
+    message = new_data_message(data=artifact, role=Role.ROLE_USER)
+    message.metadata["sender_agent_id"] = buyer_agent_id
+
+    async with httpx.AsyncClient(timeout=10.0) as httpx_client:
+        client_config = ClientConfig(streaming=False, httpx_client=httpx_client)
+        client = await create_client(agent=agent_card, client_config=client_config)
+
+        final_task: Task | None = None
+        try:
+            async for chunk in client.send_message(SendMessageRequest(message=message)):
+                if chunk.HasField("task"):
+                    final_task = chunk.task
+        except (httpx.HTTPError, A2AClientError) as exc:
+            raise AgentUnavailableError(f"Could not reach supplier agent: {exc}") from exc
+
+    if final_task is None:
+        raise TaskNotCompletedError("Supplier did not return a Task result.")
+    if final_task.status.state != TaskState.TASK_STATE_COMPLETED:
+        raise TaskNotCompletedError(
+            f"Supplier task ended in state {TaskState.Name(final_task.status.state)}, "
+            "not completed."
+        )
+
+    parts = [part for sent_artifact in final_task.artifacts for part in sent_artifact.parts]
+    data_parts = get_data_parts(parts)
+    if not data_parts:
+        raise InvalidAgentResponseError("Supplier response contained no structured data part.")
+    return data_parts[0]
+
+
+async def negotiate_purchase_via_registry(
+    *,
+    settings: BuyerAgentSettings,
+    session_factory: async_sessionmaker,
+    lines: list[dict[str, str]],
+    delivery_location_ref: str,
+) -> dict[str, Any]:
+    """Run the full M4 nonbinding negotiation: fetch this organization's
+    own MCP-sourced remaining budget, discover the supplier through
+    registry-api, send an RFQ, and converge on a NONBINDING
+    ``proposed_agreement`` (or an explicit ``reject_proposal``) by
+    countering whenever the supplier's offer exceeds budget.
+
+    **Never creates an order, reservation or payment** — M4 is
+    explicitly nonbinding end-to-end (``docs/ROADMAP.md``). Both this
+    agent and the supplier persist their own negotiation history
+    independently (``buyer_agent.negotiation_store`` /
+    ``supplier_agent.negotiation_store``).
+    """
+    purchasing_context = await fetch_purchasing_context(settings=settings)
+    remaining_budget = Decimal(purchasing_context.budget.get("remaining_amount", "0"))
+
+    discovered = await discover_supplier_via_registry(
+        registry_url=settings.registry_api_url,
+        requesting_organization_id=settings.buyer_organization_id,
+        skill_id=NEGOTIATE_SKILL_ID,
+    )
+    agent_card = await discover_supplier_agent_card(discovered.a2a_endpoint_url)
+
+    negotiation_id = str(uuid.uuid4())
+    correlation_id = str(uuid.uuid4())
+    rfq = build_rfq(
+        artifact_id=str(uuid.uuid4()),
+        transaction_id=negotiation_id,
+        correlation_id=correlation_id,
+        buyer_agent_id=settings.buyer_agent_id,
+        supplier_agent_id=discovered.agent_id,
+        buyer_organization_id=settings.buyer_organization_id,
+        proposal_id=str(uuid.uuid4()),
+        lines=lines,
+        delivery_location_ref=delivery_location_ref,
+    )
+    await negotiation_store.start_negotiation(
+        session_factory,
+        negotiation_id=negotiation_id,
+        counterparty_organization_id=discovered.organization_id,
+        counterparty_agent_id=discovered.agent_id,
+        rfq_artifact=rfq,
+    )
+
+    response = await _send_negotiation_artifact(
+        agent_card, rfq, buyer_agent_id=settings.buyer_agent_id
+    )
+    return await _negotiate_round(
+        agent_card,
+        response,
+        settings=settings,
+        session_factory=session_factory,
+        negotiation_id=negotiation_id,
+        remaining_budget=remaining_budget,
+        round_number=1,
+    )
+
+
+async def _negotiate_round(
+    agent_card: AgentCard,
+    response: dict[str, Any],
+    *,
+    settings: BuyerAgentSettings,
+    session_factory: async_sessionmaker,
+    negotiation_id: str,
+    remaining_budget: Decimal,
+    round_number: int,
+) -> dict[str, Any]:
+    """One hop of the negotiation loop: record what the supplier just
+    sent, and either converge, counter, or give up — bounded by
+    ``_MAX_BUYER_ROUNDS`` regardless of the supplier's own round cap."""
+    response_type = response.get("type")
+
+    if response_type == "reject_proposal":
+        await negotiation_store.record_received_artifact(
+            session_factory,
+            negotiation_id=negotiation_id,
+            artifact=response,
+            new_state=TradeState.REJECTED,
+            round_number=round_number,
+        )
+        return response
+
+    if response_type == "proposed_agreement":
+        validate_against_schema("proposed_agreement", response)
+        await negotiation_store.record_received_artifact(
+            session_factory,
+            negotiation_id=negotiation_id,
+            artifact=response,
+            new_state=TradeState.PENDING_AUTHORIZATION,
+            round_number=round_number,
+        )
+        return response
+
+    if response_type != "quote":
+        raise InvalidAgentResponseError(f"Unexpected negotiation response type: {response_type!r}")
+    validate_against_schema("quote", response)
+    await negotiation_store.record_received_artifact(
+        session_factory,
+        negotiation_id=negotiation_id,
+        artifact=response,
+        new_state=TradeState.PROPOSED,
+        round_number=round_number,
+    )
+
+    evaluation = evaluate_quote_against_budget(
+        lines=response["payload"]["lines"], remaining_budget=remaining_budget
+    )
+    if evaluation.within_budget:
+        accept = build_accept_proposal(
+            artifact_id=str(uuid.uuid4()),
+            transaction_id=negotiation_id,
+            correlation_id=response["correlation_id"],
+            sender_agent_id=settings.buyer_agent_id,
+            recipient_agent_id=response["sender_agent_id"],
+            organization_id=settings.buyer_organization_id,
+            proposal_id=str(uuid.uuid4()),
+            version=response["version"] + 1,
+            accepted_proposal_id=response["proposal_id"],
+            accepted_content_hash=response["content_hash"],
+        )
+        agreement_response = await _send_negotiation_artifact(
+            agent_card, accept, buyer_agent_id=settings.buyer_agent_id
+        )
+        validate_against_schema("proposed_agreement", agreement_response)
+        await negotiation_store.record_received_artifact(
+            session_factory,
+            negotiation_id=negotiation_id,
+            artifact=agreement_response,
+            new_state=TradeState.PENDING_AUTHORIZATION,
+            round_number=round_number,
+        )
+        return agreement_response
+
+    if round_number >= _MAX_BUYER_ROUNDS:
+        raise NegotiationFailedError(
+            f"Negotiation {negotiation_id} did not converge within {_MAX_BUYER_ROUNDS} rounds."
+        )
+
+    counter = build_counterproposal(
+        artifact_id=str(uuid.uuid4()),
+        transaction_id=negotiation_id,
+        correlation_id=response["correlation_id"],
+        buyer_agent_id=settings.buyer_agent_id,
+        supplier_agent_id=response["sender_agent_id"],
+        buyer_organization_id=settings.buyer_organization_id,
+        proposal_id=str(uuid.uuid4()),
+        supersedes_proposal_id=response["proposal_id"],
+        version=response["version"] + 1,
+        lines=evaluation.counter_lines or response["payload"]["lines"],
+        currency=response["payload"]["currency"],
+    )
+    await negotiation_store.record_sent_artifact(
+        session_factory,
+        negotiation_id=negotiation_id,
+        artifact=counter,
+        new_state=TradeState.NEGOTIATING,
+        round_number=round_number + 1,
+    )
+    counter_response = await _send_negotiation_artifact(
+        agent_card, counter, buyer_agent_id=settings.buyer_agent_id
+    )
+    return await _negotiate_round(
+        agent_card,
+        counter_response,
+        settings=settings,
+        session_factory=session_factory,
+        negotiation_id=negotiation_id,
+        remaining_budget=remaining_budget,
+        round_number=round_number + 1,
+    )
 
 
 async def _record(
