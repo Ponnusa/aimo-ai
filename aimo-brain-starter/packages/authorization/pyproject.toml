@@ -1,10 +1,11 @@
 [project]
 name = "authorization"
 version = "0.1.0"
-description = "OPA-backed binding policy decisions. Scaffolded in M0; implemented starting M5 (docs/ROADMAP.md)."
+description = "OPA-backed binding policy decisions (M5, docs/ROADMAP.md)."
 requires-python = ">=3.12"
 dependencies = [
   "pydantic>=2.9.0",
+  "policy-engine",
 ]
 
 [build-system]

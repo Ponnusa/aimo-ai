@@ -10,11 +10,72 @@ requirement that agents use MCP clients, not direct tool imports.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from mcp_integration import McpMalformedResponseError, call_tool
 
 from supplier_agent.settings import SupplierAgentSettings
+
+
+@dataclass(frozen=True)
+class OrderExecutionResult:
+    idempotency_key: str
+    external_order_id: str
+    status: str
+    duplicate: bool
+
+
+async def execute_order(
+    *,
+    settings: SupplierAgentSettings,
+    idempotency_key: str,
+    agreement_id: str,
+    content_hash: str,
+    buyer_organization_id: str,
+) -> OrderExecutionResult:
+    """Call supplier-mcp's narrow ``execute_order`` tool (M5) with the
+    separate execution credential — never the read-only
+    ``use_supplier_tools`` one. Propagates
+    :class:`mcp_integration.McpToolError` on any failure; callers decide
+    how to turn that into ``FAILED``/``RECONCILIATION_REQUIRED``."""
+    result = await call_tool(
+        server_url=settings.supplier_mcp_url,
+        token=settings.supplier_mcp_execution_credential,
+        tool_name="execute_order",
+        arguments={
+            "idempotency_key": idempotency_key,
+            "agreement_id": agreement_id,
+            "content_hash": content_hash,
+            "buyer_organization_id": buyer_organization_id,
+        },
+    )
+    try:
+        if result is None:
+            raise TypeError("execute_order returned no result")
+        return OrderExecutionResult(
+            idempotency_key=result["idempotency_key"],
+            external_order_id=result["external_order_id"],
+            status=result["status"],
+            duplicate=result["duplicate"],
+        )
+    except (KeyError, TypeError) as exc:
+        raise McpMalformedResponseError(f"Malformed execute_order response: {exc}") from exc
+
+
+async def get_order_status(
+    *, settings: SupplierAgentSettings, idempotency_key: str
+) -> dict[str, Any]:
+    """Reconciliation lookup (M5) -- same narrow execution credential."""
+    return (
+        await call_tool(
+            server_url=settings.supplier_mcp_url,
+            token=settings.supplier_mcp_execution_credential,
+            tool_name="get_order_status",
+            arguments={"idempotency_key": idempotency_key},
+        )
+        or {}
+    )
 
 
 async def fetch_availability_matches(

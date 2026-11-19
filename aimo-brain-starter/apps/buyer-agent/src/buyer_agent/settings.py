@@ -60,6 +60,36 @@ class BuyerAgentSettings(ServiceSettings):
         validation_alias="BUYER_MCP_SERVICE_CREDENTIAL",
     )
 
+    # M5: authorization/commitment. ``buyer_commit_service_credential`` is
+    # a pre-minted, agent-scoped "commit" credential (network-api,
+    # agent_id=buyer_agent_id), provided to this agent's operator out of
+    # band — same pattern as buyer_mcp_service_credential above. It is
+    # attached as a bearer token on every authorization_evidence/
+    # order_commit_request A2A message this agent sends, so the
+    # supplier can cryptographically verify which agent sent it rather
+    # than trusting the payload's organization_id/sender_agent_id alone.
+    buyer_commit_service_credential: str = Field(
+        default="",
+        validation_alias="BUYER_COMMIT_SERVICE_CREDENTIAL",
+    )
+    # Must match network-api's (and the supplier's) signing secret
+    # exactly — this is how this agent verifies an inbound bearer
+    # credential and an approver's "approve"-scoped credential, without a
+    # live call back to network-api.
+    service_credential_signing_secret: str = Field(
+        default="dev-only-signing-secret-change-me",
+        validation_alias="SERVICE_CREDENTIAL_SIGNING_SECRET",
+    )
+    # This organization's own versioned OPA bundle (food-wholesale owns
+    # the actual bundle contents — see
+    # food_wholesale.policies.policy_bundle_dir).
+    buyer_policy_version: str = Field(
+        default="v1",
+        validation_alias="BUYER_POLICY_VERSION",
+    )
+    # Path to the real OPA CLI binary, resolved via PATH by default.
+    opa_binary: str = Field(default="opa", validation_alias="OPA_BINARY")
+
 
 @lru_cache
 def get_settings() -> BuyerAgentSettings:

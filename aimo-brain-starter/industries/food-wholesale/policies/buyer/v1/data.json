@@ -1,0 +1,5 @@
+{
+  "approved_suppliers": ["org_fictional_wholesale_01"],
+  "budget_limit": "500.00",
+  "human_approval_threshold": "200.00"
+}

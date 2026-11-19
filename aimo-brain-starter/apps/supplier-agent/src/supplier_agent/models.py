@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database import Base
@@ -80,3 +80,65 @@ class SupplierProcessedArtifactRecord(Base):
     negotiation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     response_payload_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class SupplierApprovalRecord(Base):
+    """See the matching docstring on
+    ``buyer_agent.models.BuyerApprovalRecord`` — identical shape,
+    independently persisted, never shared or joined across the two
+    services (M5)."""
+
+    __tablename__ = "supplier_approvals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    negotiation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+    organization_id: Mapped[str] = mapped_column(String, nullable=False)
+    approver_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    policy_version: Mapped[str] = mapped_column(String, nullable=False)
+    policy_decision_json: Mapped[str] = mapped_column(Text, nullable=False)
+    audit_trail_json: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class SupplierAuthorizationEvidenceRecord(Base):
+    """See the matching docstring on
+    ``buyer_agent.models.BuyerAuthorizationEvidenceRecord``."""
+
+    __tablename__ = "supplier_authorization_evidence"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    negotiation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    organization_id: Mapped[str] = mapped_column(String, nullable=False)
+    agent_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    allow: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    human_approval_required: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    deny_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    policy_version: Mapped[str] = mapped_column(String, nullable=False)
+    policy_input_digest: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class SupplierOrderRecord(Base):
+    """Supplier-agent's own durable record of a commit attempt (M5).
+    Distinct from, and in addition to, ``supplier-mcp``'s own
+    ``supplier_mcp_orders`` table, which is the actual idempotency
+    authority for the mock order adapter — this row is this agent's own
+    audit/evidence copy of what it asked supplier-mcp to do and what it
+    was told back."""
+
+    __tablename__ = "supplier_orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    negotiation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    external_order_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

@@ -74,3 +74,40 @@ def test_wrong_scope_is_rejected() -> None:
 def test_malformed_token_is_rejected() -> None:
     with pytest.raises(ServiceCredentialMalformedError):
         verify_service_credential("not-a-real-token", signing_secret=SECRET)
+
+
+def test_agent_bound_credential_round_trips() -> None:
+    token = issue_service_credential(
+        organization_id="org_fictional_bistro_01",
+        scope="negotiate",
+        signing_secret=SECRET,
+        agent_id="agent_buyer_01",
+    )
+    claims = verify_service_credential(
+        token, signing_secret=SECRET, required_scope="negotiate", required_agent_id="agent_buyer_01"
+    )
+    assert claims.agent_id == "agent_buyer_01"
+
+
+def test_agent_bound_credential_rejects_wrong_agent_id() -> None:
+    token = issue_service_credential(
+        organization_id="org_fictional_bistro_01",
+        scope="negotiate",
+        signing_secret=SECRET,
+        agent_id="agent_buyer_01",
+    )
+    with pytest.raises(ServiceCredentialScopeError):
+        verify_service_credential(
+            token, signing_secret=SECRET, required_agent_id="agent_someone_else"
+        )
+
+
+def test_approver_bound_credential_round_trips() -> None:
+    token = issue_service_credential(
+        organization_id="org_fictional_bistro_01",
+        scope="approve",
+        signing_secret=SECRET,
+        approver_id="approver_01",
+    )
+    claims = verify_service_credential(token, signing_secret=SECRET, required_scope="approve")
+    assert claims.approver_id == "approver_01"

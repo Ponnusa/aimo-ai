@@ -203,11 +203,16 @@ async def _send_and_validate(
 async def _send_negotiation_artifact(
     agent_card: AgentCard, artifact: dict[str, Any], *, buyer_agent_id: str
 ) -> dict[str, Any]:
-    """Send one negotiation artifact (RFQ, counterproposal, accept/reject)
-    over a real A2A task and return the supplier's structured response
-    payload, unvalidated — callers check ``response["type"]`` and
-    validate against the matching schema themselves, since the response
-    type varies by negotiation state."""
+    """Send one negotiation/authorization/commitment artifact over a
+    real A2A task and return the supplier's structured response payload,
+    unvalidated — callers check ``response["type"]`` and validate
+    against the matching schema themselves, since the response type
+    varies by negotiation state. For M5 authorization/commitment
+    artifacts, the sender's agent-scoped credential travels *inside*
+    the artifact's own payload (see ``food_wholesale.authorization``'s
+    builders) rather than as message metadata, since the receiver's
+    reply is a Task artifact with no sender-metadata channel of its own
+    — both directions must carry it the same way."""
     message = new_data_message(data=artifact, role=Role.ROLE_USER)
     message.metadata["sender_agent_id"] = buyer_agent_id
 

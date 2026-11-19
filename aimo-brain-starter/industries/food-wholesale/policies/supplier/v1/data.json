@@ -1,0 +1,5 @@
+{
+  "approved_customers": ["org_fictional_bistro_01"],
+  "max_order_quantity": "500",
+  "human_approval_threshold": "200.00"
+}

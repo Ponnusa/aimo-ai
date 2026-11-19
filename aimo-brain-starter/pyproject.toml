@@ -32,6 +32,7 @@ members = [
   "packages/trade-protocol",
   "packages/audit",
   "packages/database",
+  "packages/policy-engine",
   "industries/food-wholesale",
 ]
 
@@ -44,6 +45,7 @@ authorization = { workspace = true }
 trade-protocol = { workspace = true }
 audit = { workspace = true }
 database = { workspace = true }
+policy-engine = { workspace = true }
 aimo-food-wholesale = { workspace = true }
 
 [tool.ruff]
@@ -81,6 +83,7 @@ testpaths = [
   "packages/trade-protocol/tests",
   "packages/audit/tests",
   "packages/database/tests",
+  "packages/policy-engine/tests",
   "industries/food-wholesale/tests",
   "tests",
 ]

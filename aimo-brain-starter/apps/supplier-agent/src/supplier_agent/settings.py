@@ -52,6 +52,35 @@ class SupplierAgentSettings(ServiceSettings):
         validation_alias="SUPPLIER_MCP_SERVICE_CREDENTIAL",
     )
 
+    # M5: authorization/commitment. ``supplier_commit_service_credential``
+    # is a pre-minted, agent-scoped "commit" credential (network-api,
+    # agent_id=supplier_agent_id) attached to every authorization_evidence/
+    # order_confirmation A2A message this agent sends — see the matching
+    # field docstring on buyer_agent.settings.
+    supplier_commit_service_credential: str = Field(
+        default="",
+        validation_alias="SUPPLIER_COMMIT_SERVICE_CREDENTIAL",
+    )
+    service_credential_signing_secret: str = Field(
+        default="dev-only-signing-secret-change-me",
+        validation_alias="SERVICE_CREDENTIAL_SIGNING_SECRET",
+    )
+    supplier_policy_version: str = Field(
+        default="v1",
+        validation_alias="SUPPLIER_POLICY_VERSION",
+    )
+    opa_binary: str = Field(default="opa", validation_alias="OPA_BINARY")
+
+    # M5: supplier-mcp's narrow execution tool
+    # (execute_order/get_order_status) — a separate, pre-minted
+    # "execute_order"-scoped credential, distinct from
+    # supplier_mcp_service_credential's read-only "use_supplier_tools"
+    # scope. A compromised read-only credential cannot place orders.
+    supplier_mcp_execution_credential: str = Field(
+        default="",
+        validation_alias="SUPPLIER_MCP_EXECUTION_CREDENTIAL",
+    )
+
 
 @lru_cache
 def get_settings() -> SupplierAgentSettings:

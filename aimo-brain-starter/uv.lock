@@ -21,6 +21,7 @@ members = [
     "identity",
     "mcp-integration",
     "network-api",
+    "policy-engine",
     "registry-api",
     "supplier-agent",
     "supplier-mcp",
@@ -289,11 +290,15 @@ name = "authorization"
 version = "0.1.0"
 source = { editable = "packages/authorization" }
 dependencies = [
+    { name = "policy-engine" },
     { name = "pydantic" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pydantic", specifier = ">=2.9.0" }]
+requires-dist = [
+    { name = "policy-engine", editable = "packages/policy-engine" },
+    { name = "pydantic", specifier = ">=2.9.0" },
+]
 
 [[package]]
 name = "buyer-agent"
@@ -304,9 +309,12 @@ dependencies = [
     { name = "agent-runtime" },
     { name = "aimo-food-wholesale" },
     { name = "alembic" },
+    { name = "audit" },
+    { name = "authorization" },
     { name = "database" },
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "identity" },
     { name = "mcp-integration" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -320,9 +328,12 @@ requires-dist = [
     { name = "agent-runtime", editable = "packages/agent-runtime" },
     { name = "aimo-food-wholesale", editable = "industries/food-wholesale" },
     { name = "alembic", specifier = ">=1.13.2" },
+    { name = "audit", editable = "packages/audit" },
+    { name = "authorization", editable = "packages/authorization" },
     { name = "database", editable = "packages/database" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.2" },
+    { name = "identity", editable = "packages/identity" },
     { name = "mcp-integration", editable = "packages/mcp-integration" },
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "pydantic-settings", specifier = ">=2.4.0" },
@@ -1423,6 +1434,21 @@ wheels = [
 ]
 
 [[package]]
+name = "policy-engine"
+version = "0.1.0"
+source = { editable = "packages/policy-engine" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "trade-protocol" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.9.0" },
+    { name = "trade-protocol", editable = "packages/trade-protocol" },
+]
+
+[[package]]
 name = "proto-plus"
 version = "1.29.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2129,9 +2155,12 @@ dependencies = [
     { name = "agent-runtime" },
     { name = "aimo-food-wholesale" },
     { name = "alembic" },
+    { name = "audit" },
+    { name = "authorization" },
     { name = "database" },
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "identity" },
     { name = "mcp-integration" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -2145,9 +2174,12 @@ requires-dist = [
     { name = "agent-runtime", editable = "packages/agent-runtime" },
     { name = "aimo-food-wholesale", editable = "industries/food-wholesale" },
     { name = "alembic", specifier = ">=1.13.2" },
+    { name = "audit", editable = "packages/audit" },
+    { name = "authorization", editable = "packages/authorization" },
     { name = "database", editable = "packages/database" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.2" },
+    { name = "identity", editable = "packages/identity" },
     { name = "mcp-integration", editable = "packages/mcp-integration" },
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "pydantic-settings", specifier = ">=2.4.0" },

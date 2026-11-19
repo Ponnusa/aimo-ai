@@ -106,6 +106,61 @@ async def test_issuing_credential_with_buyer_tools_scope() -> None:
 
 
 @pytest.mark.asyncio
+async def test_issuing_negotiate_credential_requires_and_binds_agent_id() -> None:
+    app, engine, settings = await _fresh_app_with_orgs("org_fictional_bistro_01")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        missing_agent_id = await client.post(
+            "/organizations/org_fictional_bistro_01/service-credentials",
+            json={"scope": "negotiate"},
+            headers={"X-Admin-Key": settings.network_admin_api_key},
+        )
+        assert missing_agent_id.status_code == 400
+
+        response = await client.post(
+            "/organizations/org_fictional_bistro_01/service-credentials",
+            json={"scope": "negotiate", "agent_id": "agent_buyer_01"},
+            headers={"X-Admin-Key": settings.network_admin_api_key},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["agent_id"] == "agent_buyer_01"
+
+    claims = verify_service_credential(
+        body["token"],
+        signing_secret=settings.service_credential_signing_secret,
+        required_scope="negotiate",
+        required_agent_id="agent_buyer_01",
+    )
+    assert claims.organization_id == "org_fictional_bistro_01"
+    assert claims.agent_id == "agent_buyer_01"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_issuing_approve_credential_requires_and_binds_approver_id() -> None:
+    app, engine, settings = await _fresh_app_with_orgs("org_fictional_bistro_01")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        missing_approver_id = await client.post(
+            "/organizations/org_fictional_bistro_01/service-credentials",
+            json={"scope": "approve"},
+            headers={"X-Admin-Key": settings.network_admin_api_key},
+        )
+        assert missing_approver_id.status_code == 400
+
+        response = await client.post(
+            "/organizations/org_fictional_bistro_01/service-credentials",
+            json={"scope": "approve", "approver_id": "approver_01"},
+            headers={"X-Admin-Key": settings.network_admin_api_key},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["approver_id"] == "approver_01"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_issuing_credential_with_unknown_scope_is_rejected() -> None:
     app, engine, settings = await _fresh_app_with_orgs("org_fictional_bistro_01")
     transport = ASGITransport(app=app)

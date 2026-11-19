@@ -27,6 +27,8 @@ A2A defines task/message transport. The following are **AIMO application artifac
 
 This is a **design example**; the implemented food-wholesale schemas (M4, see `docs/DECISIONS.md` ADR-010) are in `industries/food-wholesale/schemas/`: `request_for_quote`, `quote`, `counterproposal`, `accept_proposal`, `reject_proposal`, `proposed_agreement`. Each carries `proposal_id`/`supersedes_proposal_id`/`content_hash` (canonicalization + sha256, via `trade_protocol.negotiation`); `transaction_id` doubles as the stable negotiation ID. Avoid embedding sensitive delivery addresses in public registry metadata.
 
+M5 (see `docs/DECISIONS.md` ADR-011) adds three further artifact types, also in `industries/food-wholesale/schemas/`: `authorization_evidence` (one organization's independent OPA decision, and approval if one was required, for one exact `content_hash`), `order_commit_request` (the buyer's commitment intent, carrying an idempotency key), and `order_confirmation` (the supplier's reply from its mock order adapter — `status: "CONFIRMED"` is the exact point the simulated transaction becomes binding). All three carry a `credential` field inside their `payload`: the sender's agent-scoped `commit` service credential, verified cryptographically by the receiver before `organization_id`/`sender_agent_id` are trusted at all — never message-level metadata alone, since a supplier's synchronous Task-artifact reply has no sender metadata channel of its own.
+
 ## Domain-independent lifecycle
 
 `DISCOVERED → REQUESTED → PROPOSED ↔ NEGOTIATING → PENDING_AUTHORIZATION → AUTHORIZED → COMMITTING → COMMITTED → FULFILLING → VERIFIED`

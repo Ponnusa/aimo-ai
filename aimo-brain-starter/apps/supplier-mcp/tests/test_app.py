@@ -223,3 +223,126 @@ async def test_wrong_organization_credential_is_rejected() -> None:
             tool_name="search_catalogue",
             arguments={"query": "milk"},
         )
+
+
+@pytest.mark.asyncio
+async def test_execute_order_creates_an_order_and_status_lookup_finds_it() -> None:
+    app, settings = await _fresh_app()
+    port = find_free_port()
+    with running_server(app, port=port):
+        execution_token = _token(
+            ORG, signing_secret=settings.service_credential_signing_secret, scope="execute_order"
+        )
+        result = await call_tool(
+            server_url=f"http://127.0.0.1:{port}/mcp",
+            token=execution_token,
+            tool_name="execute_order",
+            arguments={
+                "idempotency_key": "idem_order_01",
+                "agreement_id": "txn_01",
+                "content_hash": "sha256:abc",
+                "buyer_organization_id": "org_fictional_bistro_01",
+            },
+        )
+        assert result["status"] == "confirmed"
+        assert result["duplicate"] is False
+        assert result["external_order_id"].startswith("mock_order_")
+
+        status = await call_tool(
+            server_url=f"http://127.0.0.1:{port}/mcp",
+            token=execution_token,
+            tool_name="get_order_status",
+            arguments={"idempotency_key": "idem_order_01"},
+        )
+        assert status["found"] is True
+        assert status["external_order_id"] == result["external_order_id"]
+
+
+@pytest.mark.asyncio
+async def test_execute_order_is_idempotent_for_the_same_key() -> None:
+    app, settings = await _fresh_app()
+    port = find_free_port()
+    with running_server(app, port=port):
+        execution_token = _token(
+            ORG, signing_secret=settings.service_credential_signing_secret, scope="execute_order"
+        )
+        first = await call_tool(
+            server_url=f"http://127.0.0.1:{port}/mcp",
+            token=execution_token,
+            tool_name="execute_order",
+            arguments={
+                "idempotency_key": "idem_order_dup",
+                "agreement_id": "txn_01",
+                "content_hash": "sha256:abc",
+                "buyer_organization_id": "org_fictional_bistro_01",
+            },
+        )
+        second = await call_tool(
+            server_url=f"http://127.0.0.1:{port}/mcp",
+            token=execution_token,
+            tool_name="execute_order",
+            arguments={
+                "idempotency_key": "idem_order_dup",
+                "agreement_id": "txn_01",
+                "content_hash": "sha256:abc",
+                "buyer_organization_id": "org_fictional_bistro_01",
+            },
+        )
+    assert first["external_order_id"] == second["external_order_id"]
+    assert first["duplicate"] is False
+    assert second["duplicate"] is True
+
+
+@pytest.mark.asyncio
+async def test_get_order_status_unknown_key_not_found() -> None:
+    app, settings = await _fresh_app()
+    port = find_free_port()
+    with running_server(app, port=port):
+        result = await call_tool(
+            server_url=f"http://127.0.0.1:{port}/mcp",
+            token=_token(
+                ORG,
+                signing_secret=settings.service_credential_signing_secret,
+                scope="execute_order",
+            ),
+            tool_name="get_order_status",
+            arguments={"idempotency_key": "idem_never_seen"},
+        )
+    assert result["found"] is False
+
+
+@pytest.mark.asyncio
+async def test_read_only_credential_cannot_call_execute_order() -> None:
+    """Narrow-scope enforcement (M5): a credential that only grants
+    ``use_supplier_tools`` must not be able to invoke execute_order."""
+    app, settings = await _fresh_app()
+    port = find_free_port()
+    with running_server(app, port=port), pytest.raises(McpUnauthorizedError):
+        await call_tool(
+            server_url=f"http://127.0.0.1:{port}/mcp",
+            token=_token(ORG, signing_secret=settings.service_credential_signing_secret),
+            tool_name="execute_order",
+            arguments={
+                "idempotency_key": "idem_should_fail",
+                "agreement_id": "txn_01",
+                "content_hash": "sha256:abc",
+                "buyer_organization_id": "org_fictional_bistro_01",
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_execution_credential_cannot_call_read_only_tools() -> None:
+    app, settings = await _fresh_app()
+    port = find_free_port()
+    with running_server(app, port=port), pytest.raises(McpUnauthorizedError):
+        await call_tool(
+            server_url=f"http://127.0.0.1:{port}/mcp",
+            token=_token(
+                ORG,
+                signing_secret=settings.service_credential_signing_secret,
+                scope="execute_order",
+            ),
+            tool_name="search_catalogue",
+            arguments={"query": "milk"},
+        )

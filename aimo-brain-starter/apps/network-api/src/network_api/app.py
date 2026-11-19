@@ -33,9 +33,33 @@ from network_api.settings import get_settings
 AGENT_MANAGEMENT_SCOPE = "manage_agents"
 BUYER_TOOLS_SCOPE = "use_buyer_tools"
 SUPPLIER_TOOLS_SCOPE = "use_supplier_tools"
+#: M5 scopes. ``negotiate``/``commit`` bind to one ``agent_id`` — see
+#: docs/DECISIONS.md ADR-011: they authenticate which registered agent is
+#: sending a negotiation/authorization/commit A2A message, closing the
+#: M4 gap where only the unauthenticated payload's organization_id/
+#: sender_agent_id were checked. ``approve`` binds to one ``approver_id``
+#: (a pre-registered human approver stand-in — no OIDC yet).
+#: ``execute_order`` is the supplier-mcp execution tool's own narrow
+#: scope, separate from the read-only ``use_supplier_tools`` scope.
+NEGOTIATE_SCOPE = "negotiate"
+COMMIT_SCOPE = "commit"
+APPROVE_SCOPE = "approve"
+EXECUTE_ORDER_SCOPE = "execute_order"
 ALLOWED_SERVICE_CREDENTIAL_SCOPES = frozenset(
-    {AGENT_MANAGEMENT_SCOPE, BUYER_TOOLS_SCOPE, SUPPLIER_TOOLS_SCOPE}
+    {
+        AGENT_MANAGEMENT_SCOPE,
+        BUYER_TOOLS_SCOPE,
+        SUPPLIER_TOOLS_SCOPE,
+        NEGOTIATE_SCOPE,
+        COMMIT_SCOPE,
+        APPROVE_SCOPE,
+        EXECUTE_ORDER_SCOPE,
+    }
 )
+#: Scopes that must be bound to one specific agent_id at issuance time.
+AGENT_BOUND_SCOPES = frozenset({NEGOTIATE_SCOPE, COMMIT_SCOPE})
+#: Scopes that must be bound to one specific approver_id at issuance time.
+APPROVER_BOUND_SCOPES = frozenset({APPROVE_SCOPE})
 
 
 class OrganizationOut(BaseModel):
@@ -52,6 +76,8 @@ class HealthOut(BaseModel):
 class ServiceCredentialRequest(BaseModel):
     ttl_seconds: int = 3600
     scope: str = AGENT_MANAGEMENT_SCOPE
+    agent_id: str | None = None
+    approver_id: str | None = None
 
 
 class ServiceCredentialOut(BaseModel):
@@ -59,6 +85,8 @@ class ServiceCredentialOut(BaseModel):
     organization_id: str
     scope: str
     expires_in_seconds: int
+    agent_id: str | None = None
+    approver_id: str | None = None
 
 
 class RelationshipIn(BaseModel):
@@ -143,6 +171,12 @@ def create_app() -> FastAPI:
                     f"Allowed: {sorted(ALLOWED_SERVICE_CREDENTIAL_SCOPES)}."
                 ),
             )
+        if body.scope in AGENT_BOUND_SCOPES and not body.agent_id:
+            raise HTTPException(status_code=400, detail=f"Scope {body.scope!r} requires agent_id.")
+        if body.scope in APPROVER_BOUND_SCOPES and not body.approver_id:
+            raise HTTPException(
+                status_code=400, detail=f"Scope {body.scope!r} requires approver_id."
+            )
 
         async with session_factory() as session:
             org = await session.get(OrganizationRecord, organization_id)
@@ -156,12 +190,16 @@ def create_app() -> FastAPI:
             scope=body.scope,
             signing_secret=settings.service_credential_signing_secret,
             ttl_seconds=body.ttl_seconds,
+            agent_id=body.agent_id if body.scope in AGENT_BOUND_SCOPES else None,
+            approver_id=body.approver_id if body.scope in APPROVER_BOUND_SCOPES else None,
         )
         return ServiceCredentialOut(
             token=token,
             organization_id=organization_id,
             scope=body.scope,
             expires_in_seconds=body.ttl_seconds,
+            agent_id=body.agent_id if body.scope in AGENT_BOUND_SCOPES else None,
+            approver_id=body.approver_id if body.scope in APPROVER_BOUND_SCOPES else None,
         )
 
     @app.post("/relationships", response_model=RelationshipOut)

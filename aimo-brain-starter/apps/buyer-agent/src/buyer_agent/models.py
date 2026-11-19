@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database import Base
@@ -71,3 +71,71 @@ class BuyerProposalRecord(Base):
     supersedes_proposal_id: Mapped[str | None] = mapped_column(String, nullable=True)
     payload_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class BuyerApprovalRecord(Base):
+    """A durable human-approval request/decision (M5), bound to one exact
+    ``negotiation_id``+``content_hash``. Any new proposal content_hash for
+    the same agreement needs its own row — an old row is never reused or
+    silently reinterpreted for different terms (docs/SECURITY.md)."""
+
+    __tablename__ = "buyer_approvals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    negotiation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+    organization_id: Mapped[str] = mapped_column(String, nullable=False)
+    approver_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    policy_version: Mapped[str] = mapped_column(String, nullable=False)
+    policy_decision_json: Mapped[str] = mapped_column(Text, nullable=False)
+    audit_trail_json: Mapped[str] = mapped_column(Text, nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class BuyerAuthorizationEvidenceRecord(Base):
+    """One organization's independent policy decision for one exact
+    ``content_hash`` (M5): ``source="own"`` is this organization's own
+    decision; ``source="counterparty"`` is the supplier's, received and
+    credential-verified over A2A — never trusted from the payload alone.
+    Unique per (negotiation_id, content_hash, source): a different hash
+    needs a new row, never an update to this one."""
+
+    __tablename__ = "buyer_authorization_evidence"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    negotiation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    organization_id: Mapped[str] = mapped_column(String, nullable=False)
+    agent_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    allow: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    human_approval_required: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    deny_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+    policy_version: Mapped[str] = mapped_column(String, nullable=False)
+    policy_input_digest: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class BuyerOrderRecord(Base):
+    """Buyer's own outbox row for a commit attempt (M5). ``idempotency_key``
+    is UNIQUE: writing this row (state=COMMITTING) happens in the same
+    local transaction as the decision to attempt a commit, before any
+    network call — so a crash after this write but before a response is
+    always recoverable by retrying with the same key, never by assuming
+    success or failure."""
+
+    __tablename__ = "buyer_orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    negotiation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    content_hash: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    external_order_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

@@ -30,7 +30,7 @@ from mcp_integration import McpToolError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from trade_protocol import NegotiationTransitionError
 
-from supplier_agent import negotiation
+from supplier_agent import commitment, negotiation
 from supplier_agent.a2a_card import CHECK_AVAILABILITY_SKILL_ID
 from supplier_agent.mcp_client import fetch_availability_matches
 from supplier_agent.models import SupplierTaskRecord
@@ -50,6 +50,17 @@ _NEGOTIATION_HANDLERS = {
     "counterproposal": ("counterproposal", negotiation.handle_counterproposal),
     "accept_proposal": ("accept_proposal", negotiation.handle_accept_proposal),
     "reject_proposal": ("reject_proposal", negotiation.handle_reject_proposal),
+}
+
+#: M5: authorization-evidence exchange and commitment artifact types.
+#: Handled separately from ``_NEGOTIATION_HANDLERS`` because they require
+#: the inbound message's bearer credential, not just the payload.
+_COMMITMENT_HANDLERS = {
+    "authorization_evidence": (
+        "authorization_evidence",
+        commitment.handle_authorization_evidence,
+    ),
+    "order_commit_request": ("order_commit_request", commitment.handle_order_commit_request),
 }
 
 
@@ -109,6 +120,14 @@ class SupplierAgentExecutor(AgentExecutor):
                     settings=self._settings,
                     session_factory=self._session_factory,
                 )
+            elif artifact_type in _COMMITMENT_HANDLERS:
+                schema_name, handler = _COMMITMENT_HANDLERS[artifact_type]
+                validate_against_schema(schema_name, request_payload)
+                response = await handler(
+                    request_payload,
+                    settings=self._settings,
+                    session_factory=self._session_factory,
+                )
             else:
                 validate_against_schema("product_availability_request", request_payload)
                 matches_by_query = await fetch_availability_matches(
@@ -144,6 +163,10 @@ class SupplierAgentExecutor(AgentExecutor):
         ) as exc:
             await self._record(task.id, state="FAILED", counterparty_agent_id=counterparty)
             await updater.failed(message=new_text_message(f"Negotiation rejected: {exc}"))
+            return
+        except commitment.CommitmentError as exc:
+            await self._record(task.id, state="FAILED", counterparty_agent_id=counterparty)
+            await updater.failed(message=new_text_message(f"Commitment rejected: {exc}"))
             return
         except DomainHandlerError as exc:
             await self._record(task.id, state="FAILED", counterparty_agent_id=counterparty)
