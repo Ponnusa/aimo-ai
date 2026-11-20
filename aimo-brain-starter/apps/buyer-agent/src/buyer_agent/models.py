@@ -86,6 +86,10 @@ class BuyerApprovalRecord(Base):
     content_hash: Mapped[str] = mapped_column(String, nullable=False)
     organization_id: Mapped[str] = mapped_column(String, nullable=False)
     approver_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    #: The dev-OIDC-shaped token's ``iss`` claim (always prefixed
+    #: ``dev-oidc:`` — see ``buyer_agent.dev_oidc``), recorded for audit
+    #: so it is always visible that no real identity provider was used.
+    approver_issuer: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False)
     policy_version: Mapped[str] = mapped_column(String, nullable=False)
     policy_decision_json: Mapped[str] = mapped_column(Text, nullable=False)
@@ -139,3 +143,21 @@ class BuyerOrderRecord(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class BuyerSeenMessageProofRecord(Base):
+    """Replay protection for every inbound, proof-signed artifact (M5.1):
+    one row per signed message's ``jti``. ``jti`` is UNIQUE — a resent
+    artifact with the exact same ``jti`` is rejected even if its
+    signature is still otherwise cryptographically valid. Covers every
+    artifact type, not just the M5 authorization/commitment ones,
+    unlike M5's old per-record HMAC credential checks."""
+
+    __tablename__ = "buyer_seen_message_proofs"
+
+    jti: Mapped[str] = mapped_column(String, primary_key=True)
+    negotiation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    artifact_type: Mapped[str] = mapped_column(String, nullable=False)
+    organization_id: Mapped[str] = mapped_column(String, nullable=False)
+    agent_id: Mapped[str] = mapped_column(String, nullable=False)
+    seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

@@ -98,6 +98,16 @@ class DiscoveredAgentOut(BaseModel):
     a2a_endpoint_url: str
 
 
+class AgentSenderVerificationOut(BaseModel):
+    """M5.1: result of confirming a verified message's claimed sender is
+    a registered, active agent with an active trading relationship to
+    the counterparty verifying it."""
+
+    agent_id: str
+    organization_id: str
+    status: str
+
+
 def _canonical_fingerprint(card) -> str:
     skill_ids = sorted(skill.id for skill in card.skills)
     canonical = json.dumps({"name": card.name, "skills": skill_ids}, sort_keys=True)
@@ -503,6 +513,58 @@ def create_app() -> FastAPI:
             if match.agent_id == agent_id:
                 return match
         raise HTTPException(status_code=404, detail="Agent not discoverable.")
+
+    @app.get("/agents/{agent_id}/verify-sender", response_model=AgentSenderVerificationOut)
+    async def verify_sender(
+        agent_id: str, claimed_organization_id: str, counterparty_organization_id: str
+    ) -> AgentSenderVerificationOut:
+        """M5.1: confirm a cryptographically-verified A2A message's
+        claimed sender is a registered, ``active`` agent of
+        ``claimed_organization_id``, *and* that an active trading
+        relationship exists between it and ``counterparty_organization_id``
+        -- in either direction, unlike ``/agents`` (M2 discovery), which
+        deliberately only ever treats the requester as the buyer side.
+        Message authentication has no "buyer" or "supplier" role of its
+        own: either side may be verifying the other."""
+        async with session_factory() as session:
+            record = await session.get(RegistryAgentRecord, agent_id)
+        if (
+            record is None
+            or record.status != "active"
+            or record.organization_id != claimed_organization_id
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Agent {agent_id!r} is not an active agent of {claimed_organization_id!r}.",
+            )
+
+        try:
+            related = await has_active_relationship(
+                network_api_url=settings.network_api_url,
+                internal_service_key=settings.network_internal_service_key,
+                buyer_organization_id=claimed_organization_id,
+                supplier_organization_id=counterparty_organization_id,
+            ) or await has_active_relationship(
+                network_api_url=settings.network_api_url,
+                internal_service_key=settings.network_internal_service_key,
+                buyer_organization_id=counterparty_organization_id,
+                supplier_organization_id=claimed_organization_id,
+            )
+        except RelationshipLookupError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Could not verify trading relationship: {exc}"
+            ) from exc
+
+        if not related:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No active trading relationship between {claimed_organization_id!r} "
+                f"and {counterparty_organization_id!r}.",
+            )
+
+        return AgentSenderVerificationOut(
+            agent_id=agent_id, organization_id=claimed_organization_id, status=record.status
+        )
 
     return app
 

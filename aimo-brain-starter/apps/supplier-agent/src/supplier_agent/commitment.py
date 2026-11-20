@@ -21,10 +21,10 @@ from food_wholesale import (
     compute_idempotency_key,
 )
 from mcp_integration import McpToolError
+from message_integrity import VerifiedProof
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from identity import ServiceCredentialError, verify_service_credential
 from supplier_agent import authorization, mcp_client, negotiation_store
 from supplier_agent.models import SupplierOrderRecord
 from supplier_agent.negotiation_store import NegotiationNotFoundError
@@ -44,12 +44,16 @@ class NotAuthorizedError(CommitmentError):
 async def handle_authorization_evidence(
     payload: dict[str, Any],
     *,
+    verified: VerifiedProof,
     settings: SupplierAgentSettings,
     session_factory: async_sessionmaker,
 ) -> dict[str, Any]:
-    """Record the buyer's credential-verified evidence, independently
-    evaluate this organization's own policy/approval for the same exact
-    content_hash, and reply with this organization's own evidence
+    """``verified`` is the already-cryptographically-verified sender of
+    ``payload`` (signature, replay, registry/relationship checks all
+    already done by ``supplier_agent.a2a_executor`` before this handler
+    ever runs). Records the buyer's evidence, independently evaluates
+    this organization's own policy/approval for the same exact
+    content_hash, and replies with this organization's own evidence
     artifact (allow=False/deny_reason="human_approval_pending" if a
     human approval is still outstanding -- never a premature allow)."""
     negotiation_id = payload["payload"]["agreement_id"]
@@ -58,10 +62,10 @@ async def handle_authorization_evidence(
     try:
         await authorization.record_counterparty_evidence(
             session_factory,
-            settings=settings,
             negotiation_id=negotiation_id,
             content_hash=content_hash_value,
             artifact=payload,
+            verified=verified,
         )
     except NegotiationNotFoundError as exc:
         raise CommitmentError(str(exc)) from exc
@@ -91,7 +95,6 @@ async def handle_authorization_evidence(
             deny_reason=authorization.APPROVAL_PENDING_REASON,
             policy_version=outcome.policy_version,
             policy_input_digest=outcome.policy_input_digest,
-            credential=settings.supplier_commit_service_credential,
         )
 
     return build_authorization_evidence(
@@ -110,47 +113,37 @@ async def handle_authorization_evidence(
         deny_reason=outcome.deny_reason,
         policy_version=outcome.policy_version,
         policy_input_digest=outcome.policy_input_digest,
-        credential=settings.supplier_commit_service_credential,
     )
 
 
 async def handle_order_commit_request(
     payload: dict[str, Any],
     *,
+    verified: VerifiedProof,
     settings: SupplierAgentSettings,
     session_factory: async_sessionmaker,
 ) -> dict[str, Any]:
-    """Only reachable once this organization independently holds
-    ``allow=True`` evidence from *both* sides for the exact same
-    content_hash (:func:`supplier_agent.authorization.is_mutually_authorized`)
-    -- otherwise raises :class:`NotAuthorizedError` rather than touching
+    """``verified`` is the already-cryptographically-verified sender of
+    ``payload`` (``supplier_agent.a2a_executor`` runs signature/replay/
+    registry checks before this handler is ever called). Only reachable
+    once this organization independently holds ``allow=True`` evidence
+    from *both* sides for the exact same content_hash
+    (:func:`supplier_agent.authorization.is_mutually_authorized`) --
+    otherwise raises :class:`NotAuthorizedError` rather than touching
     the mock order adapter at all."""
     negotiation_id = payload["payload"]["agreement_id"]
     content_hash_value = payload["payload"]["content_hash"]
     idempotency_key = payload["payload"]["idempotency_key"]
-    bearer_credential = payload["payload"].get("credential")
 
     negotiation = await negotiation_store.get_negotiation(session_factory, negotiation_id)
     if negotiation is None:
         raise CommitmentError(f"Unknown negotiation {negotiation_id!r}.")
 
-    if bearer_credential is None:
-        raise NotAuthorizedError("No credential presented with commit request.")
-    try:
-        claims = verify_service_credential(
-            bearer_credential,
-            signing_secret=settings.service_credential_signing_secret,
-            required_scope="commit",
-        )
-    except ServiceCredentialError as exc:
-        raise NotAuthorizedError(str(exc)) from exc
     if (
-        claims.organization_id != negotiation.counterparty_organization_id
-        or claims.agent_id != negotiation.counterparty_agent_id
+        verified.organization_id != negotiation.counterparty_organization_id
+        or verified.agent_id != negotiation.counterparty_agent_id
     ):
-        raise NotAuthorizedError(
-            "Commit credential does not match this negotiation's counterparty."
-        )
+        raise NotAuthorizedError("Verified sender does not match this negotiation's counterparty.")
 
     expected_key = compute_idempotency_key(
         content_hash_value=content_hash_value,
@@ -204,7 +197,6 @@ async def handle_order_commit_request(
         idempotency_key=idempotency_key,
         status=status,
         external_order_id=external_order_id,
-        credential=settings.supplier_commit_service_credential,
     )
 
 

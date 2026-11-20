@@ -21,10 +21,11 @@ from a2a.types import AgentCard, Role, SendMessageRequest, Task, TaskState
 from food_wholesale.availability import build_request, validate_response
 from food_wholesale.negotiation import build_accept_proposal, build_counterproposal, build_rfq
 from food_wholesale.schemas import validate_against_schema
+from message_integrity import VerifiedProof
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from trade_protocol import TradeState
 
-from buyer_agent import negotiation_store
+from buyer_agent import message_auth, negotiation_store
 from buyer_agent.mcp_client import fetch_purchasing_context
 from buyer_agent.models import BuyerTaskRecord
 from buyer_agent.negotiation import evaluate_quote_against_budget
@@ -201,20 +202,30 @@ async def _send_and_validate(
 
 
 async def _send_negotiation_artifact(
-    agent_card: AgentCard, artifact: dict[str, Any], *, buyer_agent_id: str
-) -> dict[str, Any]:
-    """Send one negotiation/authorization/commitment artifact over a
-    real A2A task and return the supplier's structured response payload,
-    unvalidated — callers check ``response["type"]`` and validate
+    agent_card: AgentCard,
+    artifact: dict[str, Any],
+    *,
+    settings: BuyerAgentSettings,
+    session_factory: async_sessionmaker,
+    recipient_organization_id: str,
+) -> tuple[dict[str, Any], VerifiedProof]:
+    """Sign ``artifact`` with this organization's own key, send it over
+    a real A2A task, and cryptographically verify the supplier's
+    structured response before returning it (M5.1) — signature, replay,
+    registered-agent, trading-relationship, *and* (once the negotiation
+    already has a recorded counterparty) negotiation-participant
+    binding. Callers still check ``response["type"]`` and validate
     against the matching schema themselves, since the response type
-    varies by negotiation state. For M5 authorization/commitment
-    artifacts, the sender's agent-scoped credential travels *inside*
-    the artifact's own payload (see ``food_wholesale.authorization``'s
-    builders) rather than as message metadata, since the receiver's
-    reply is a Task artifact with no sender-metadata channel of its own
-    — both directions must carry it the same way."""
-    message = new_data_message(data=artifact, role=Role.ROLE_USER)
-    message.metadata["sender_agent_id"] = buyer_agent_id
+    varies by negotiation state.
+
+    Raises :class:`buyer_agent.message_auth.MessageAuthenticationError`
+    if the response cannot be authenticated — never returns an
+    unauthenticated response to a caller."""
+    signed_artifact = message_auth.sign_outbound_artifact(
+        artifact, settings=settings, recipient_organization_id=recipient_organization_id
+    )
+    message = new_data_message(data=signed_artifact, role=Role.ROLE_USER)
+    message.metadata["sender_agent_id"] = settings.buyer_agent_id
 
     async with httpx.AsyncClient(timeout=10.0) as httpx_client:
         client_config = ClientConfig(streaming=False, httpx_client=httpx_client)
@@ -240,7 +251,22 @@ async def _send_negotiation_artifact(
     data_parts = get_data_parts(parts)
     if not data_parts:
         raise InvalidAgentResponseError("Supplier response contained no structured data part.")
-    return data_parts[0]
+    response = data_parts[0]
+
+    verified = await message_auth.verify_inbound_artifact(
+        response, settings=settings, session_factory=session_factory
+    )
+    negotiation = await negotiation_store.get_negotiation(
+        session_factory, response.get("transaction_id", artifact["transaction_id"])
+    )
+    if negotiation is not None and (
+        verified.organization_id != negotiation.counterparty_organization_id
+        or verified.agent_id != negotiation.counterparty_agent_id
+    ):
+        raise message_auth.MessageAuthenticationError(
+            "Verified response sender does not match this negotiation's counterparty."
+        )
+    return response, verified
 
 
 async def negotiate_purchase_via_registry(
@@ -293,8 +319,12 @@ async def negotiate_purchase_via_registry(
         rfq_artifact=rfq,
     )
 
-    response = await _send_negotiation_artifact(
-        agent_card, rfq, buyer_agent_id=settings.buyer_agent_id
+    response, _verified = await _send_negotiation_artifact(
+        agent_card,
+        rfq,
+        settings=settings,
+        session_factory=session_factory,
+        recipient_organization_id=discovered.organization_id,
     )
     return await _negotiate_round(
         agent_card,
@@ -304,6 +334,7 @@ async def negotiate_purchase_via_registry(
         negotiation_id=negotiation_id,
         remaining_budget=remaining_budget,
         round_number=1,
+        supplier_organization_id=discovered.organization_id,
     )
 
 
@@ -316,6 +347,7 @@ async def _negotiate_round(
     negotiation_id: str,
     remaining_budget: Decimal,
     round_number: int,
+    supplier_organization_id: str,
 ) -> dict[str, Any]:
     """One hop of the negotiation loop: record what the supplier just
     sent, and either converge, counter, or give up — bounded by
@@ -370,8 +402,12 @@ async def _negotiate_round(
             accepted_proposal_id=response["proposal_id"],
             accepted_content_hash=response["content_hash"],
         )
-        agreement_response = await _send_negotiation_artifact(
-            agent_card, accept, buyer_agent_id=settings.buyer_agent_id
+        agreement_response, _verified = await _send_negotiation_artifact(
+            agent_card,
+            accept,
+            settings=settings,
+            session_factory=session_factory,
+            recipient_organization_id=supplier_organization_id,
         )
         validate_against_schema("proposed_agreement", agreement_response)
         await negotiation_store.record_received_artifact(
@@ -408,8 +444,12 @@ async def _negotiate_round(
         new_state=TradeState.NEGOTIATING,
         round_number=round_number + 1,
     )
-    counter_response = await _send_negotiation_artifact(
-        agent_card, counter, buyer_agent_id=settings.buyer_agent_id
+    counter_response, _verified = await _send_negotiation_artifact(
+        agent_card,
+        counter,
+        settings=settings,
+        session_factory=session_factory,
+        recipient_organization_id=supplier_organization_id,
     )
     return await _negotiate_round(
         agent_card,
@@ -419,6 +459,7 @@ async def _negotiate_round(
         negotiation_id=negotiation_id,
         remaining_budget=remaining_budget,
         round_number=round_number + 1,
+        supplier_organization_id=supplier_organization_id,
     )
 
 

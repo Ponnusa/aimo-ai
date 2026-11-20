@@ -95,6 +95,7 @@ class SupplierApprovalRecord(Base):
     content_hash: Mapped[str] = mapped_column(String, nullable=False)
     organization_id: Mapped[str] = mapped_column(String, nullable=False)
     approver_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    approver_issuer: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False)
     policy_version: Mapped[str] = mapped_column(String, nullable=False)
     policy_decision_json: Mapped[str] = mapped_column(Text, nullable=False)
@@ -142,3 +143,18 @@ class SupplierOrderRecord(Base):
     external_order_id: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class SupplierSeenMessageProofRecord(Base):
+    """See the matching docstring on
+    ``buyer_agent.models.BuyerSeenMessageProofRecord`` (M5.1 replay
+    protection, every artifact type)."""
+
+    __tablename__ = "supplier_seen_message_proofs"
+
+    jti: Mapped[str] = mapped_column(String, primary_key=True)
+    negotiation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    artifact_type: Mapped[str] = mapped_column(String, nullable=False)
+    organization_id: Mapped[str] = mapped_column(String, nullable=False)
+    agent_id: Mapped[str] = mapped_column(String, nullable=False)
+    seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

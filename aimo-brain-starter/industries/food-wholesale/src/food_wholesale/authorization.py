@@ -109,20 +109,16 @@ def build_authorization_evidence(
     deny_reason: str | None,
     policy_version: str,
     policy_input_digest: str,
-    credential: str,
     approval_id: str | None = None,
     approver_id: str | None = None,
     validity: timedelta = timedelta(hours=2),
 ) -> dict[str, Any]:
     """Build and validate an ``authorization_evidence`` artifact carrying
     one organization's own, independent policy decision (and approval,
-    if one was required) for ``content_hash_value``. ``credential`` is
-    the sender's agent-scoped ``commit`` service credential, carried
-    inside the payload so it survives both an outbound A2A message and
-    the receiver's synchronous Task-artifact reply (which has no sender
-    message metadata of its own) — the receiver always verifies it
-    cryptographically before trusting ``organization_id``/
-    ``sender_agent_id`` at all."""
+    if one was required) for ``content_hash_value``. The caller attaches
+    the per-artifact JWS ``proof`` separately, via
+    ``message_integrity.sign_artifact`` (M5.1, docs/DECISIONS.md
+    ADR-012) — this builder never embeds a raw credential."""
     artifact = _envelope(
         artifact_id=artifact_id,
         transaction_id=transaction_id,
@@ -143,7 +139,6 @@ def build_authorization_evidence(
             "policy_input_digest": policy_input_digest,
             "approval_id": approval_id,
             "approver_id": approver_id,
-            "credential": credential,
         },
         validity=validity,
     )
@@ -164,7 +159,6 @@ def build_order_commit_request(
     agreement_id: str,
     content_hash_value: str,
     idempotency_key: str,
-    credential: str,
     validity: timedelta = timedelta(hours=1),
 ) -> dict[str, Any]:
     """Build and validate an ``order_commit_request`` artifact: the
@@ -183,7 +177,6 @@ def build_order_commit_request(
             "agreement_id": agreement_id,
             "content_hash": content_hash_value,
             "idempotency_key": idempotency_key,
-            "credential": credential,
         },
         validity=validity,
     )
@@ -205,7 +198,6 @@ def build_order_confirmation(
     idempotency_key: str,
     status: str,
     external_order_id: str | None,
-    credential: str,
     validity: timedelta = timedelta(days=30),
 ) -> dict[str, Any]:
     """Build and validate an ``order_confirmation`` artifact. ``status ==
@@ -226,7 +218,6 @@ def build_order_confirmation(
             "idempotency_key": idempotency_key,
             "status": status,
             "external_order_id": external_order_id,
-            "credential": credential,
         },
         validity=validity,
     )

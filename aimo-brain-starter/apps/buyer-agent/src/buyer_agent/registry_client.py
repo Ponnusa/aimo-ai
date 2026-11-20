@@ -72,3 +72,42 @@ async def discover_supplier_via_registry(
         display_name=chosen["display_name"],
         a2a_endpoint_url=chosen["a2a_endpoint_url"],
     )
+
+
+async def verify_agent_is_registered_and_related(
+    *,
+    registry_url: str,
+    requesting_organization_id: str,
+    agent_id: str,
+    organization_id: str,
+    fetch_timeout_seconds: float = 5.0,
+) -> None:
+    """M5.1: confirm a cryptographically-verified message's claimed
+    sender is actually a registered, ``active`` agent of
+    ``organization_id`` *and* that an active trading relationship
+    exists with this organization. Uses ``GET /agents/{id}/verify-sender``
+    (direction-agnostic) rather than the M2 ``/agents`` discovery
+    endpoint, which always treats the requester as the buyer side —
+    message authentication has no such fixed role, either side may be
+    verifying the other. Raises :class:`RegistryDiscoveryError` if
+    either check fails, or if registry-api cannot be reached (fail
+    closed, never assume valid)."""
+    try:
+        async with httpx.AsyncClient(timeout=fetch_timeout_seconds) as client:
+            response = await client.get(
+                f"{registry_url}/agents/{agent_id}/verify-sender",
+                params={
+                    "claimed_organization_id": organization_id,
+                    "counterparty_organization_id": requesting_organization_id,
+                },
+            )
+    except httpx.HTTPError as exc:
+        raise RegistryDiscoveryError(
+            f"Could not reach registry-api at {registry_url}: {exc}"
+        ) from exc
+
+    if response.status_code != 200:
+        raise RegistryDiscoveryError(
+            f"Agent {agent_id!r} of organization {organization_id!r} is not an active, "
+            f"related sender for {requesting_organization_id!r} (status {response.status_code})."
+        )

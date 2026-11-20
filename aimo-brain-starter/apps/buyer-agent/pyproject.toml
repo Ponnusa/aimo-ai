@@ -19,6 +19,7 @@ dependencies = [
   "identity",
   "authorization",
   "audit",
+  "message-integrity",
 ]
 
 [build-system]

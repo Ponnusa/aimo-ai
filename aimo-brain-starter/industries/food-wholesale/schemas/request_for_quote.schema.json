@@ -20,43 +20,104 @@
     "payload"
   ],
   "properties": {
-    "schema": { "type": "string" },
-    "artifact_id": { "type": "string" },
+    "schema": {
+      "type": "string"
+    },
+    "artifact_id": {
+      "type": "string"
+    },
     "transaction_id": {
       "type": "string",
       "description": "Doubles as the stable negotiation ID for this RFQ and every proposal that follows it."
     },
-    "correlation_id": { "type": "string" },
-    "sender_agent_id": { "type": "string" },
-    "recipient_agent_id": { "type": "string" },
-    "organization_id": { "type": "string" },
-    "domain": { "const": "food-wholesale" },
-    "type": { "const": "request_for_quote" },
-    "version": { "type": "integer", "minimum": 1 },
+    "correlation_id": {
+      "type": "string"
+    },
+    "sender_agent_id": {
+      "type": "string"
+    },
+    "recipient_agent_id": {
+      "type": "string"
+    },
+    "organization_id": {
+      "type": "string"
+    },
+    "domain": {
+      "const": "food-wholesale"
+    },
+    "type": {
+      "const": "request_for_quote"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
     "proposal_id": {
       "type": "string",
       "description": "This artifact's own immutable proposal ID. An RFQ is always proposal version 1 of its negotiation, so it never has a supersedes_proposal_id."
     },
-    "created_at": { "type": "string", "format": "date-time" },
-    "expires_at": { "type": "string", "format": "date-time" },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
     "payload": {
       "type": "object",
-      "required": ["lines", "delivery_location_ref"],
+      "required": [
+        "lines",
+        "delivery_location_ref"
+      ],
       "properties": {
         "lines": {
           "type": "array",
           "minItems": 1,
           "items": {
             "type": "object",
-            "required": ["product_query", "quantity", "unit"],
+            "required": [
+              "product_query",
+              "quantity",
+              "unit"
+            ],
             "properties": {
-              "product_query": { "type": "string" },
-              "quantity": { "type": "string", "description": "decimal string, never a binary float" },
-              "unit": { "type": "string" }
+              "product_query": {
+                "type": "string"
+              },
+              "quantity": {
+                "type": "string",
+                "description": "decimal string, never a binary float"
+              },
+              "unit": {
+                "type": "string"
+              }
             }
           }
         },
-        "delivery_location_ref": { "type": "string" }
+        "delivery_location_ref": {
+          "type": "string"
+        }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "description": "Per-artifact JWS signature (M5.1, docs/DECISIONS.md ADR-012): the sender organization's Ed25519 signature over this artifact's canonicalized content plus iss/sub/aud/neg/typ/ver/hash/jti/exp claims. message_integrity.verify_artifact_proof requires its presence and validity before any business handler runs -- optional here because JSON Schema validates structure, not authentication.",
+      "required": [
+        "alg",
+        "kid",
+        "jws"
+      ],
+      "properties": {
+        "alg": {
+          "const": "EdDSA"
+        },
+        "kid": {
+          "type": "string"
+        },
+        "jws": {
+          "type": "string"
+        }
       }
     }
   },

@@ -21,19 +21,48 @@
     "payload"
   ],
   "properties": {
-    "schema": { "type": "string" },
-    "artifact_id": { "type": "string" },
-    "transaction_id": { "type": "string" },
-    "correlation_id": { "type": "string" },
-    "sender_agent_id": { "type": "string" },
-    "recipient_agent_id": { "type": "string" },
-    "organization_id": { "type": "string" },
-    "domain": { "const": "food-wholesale" },
-    "type": { "const": "authorization_evidence" },
-    "version": { "type": "integer", "minimum": 1 },
-    "proposal_id": { "type": "string" },
-    "created_at": { "type": "string", "format": "date-time" },
-    "expires_at": { "type": "string", "format": "date-time" },
+    "schema": {
+      "type": "string"
+    },
+    "artifact_id": {
+      "type": "string"
+    },
+    "transaction_id": {
+      "type": "string"
+    },
+    "correlation_id": {
+      "type": "string"
+    },
+    "sender_agent_id": {
+      "type": "string"
+    },
+    "recipient_agent_id": {
+      "type": "string"
+    },
+    "organization_id": {
+      "type": "string"
+    },
+    "domain": {
+      "const": "food-wholesale"
+    },
+    "type": {
+      "const": "authorization_evidence"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "proposal_id": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
     "payload": {
       "type": "object",
       "required": [
@@ -42,26 +71,66 @@
         "allow",
         "human_approval_required",
         "policy_version",
-        "policy_input_digest",
-        "credential"
+        "policy_input_digest"
       ],
       "properties": {
-        "agreement_id": { "type": "string" },
-        "credential": {
-          "type": "string",
-          "description": "The sender's agent-scoped 'commit' service credential (network-api issued), verified by the receiver before this artifact's organization_id/sender_agent_id fields are trusted at all."
+        "agreement_id": {
+          "type": "string"
         },
         "content_hash": {
           "type": "string",
           "description": "The exact proposed_agreement content_hash this evidence authorizes. Never a different or re-derived hash."
         },
-        "allow": { "type": "boolean" },
-        "human_approval_required": { "type": "boolean" },
-        "deny_reason": { "type": ["string", "null"] },
-        "policy_version": { "type": "string" },
-        "policy_input_digest": { "type": "string" },
-        "approval_id": { "type": ["string", "null"] },
-        "approver_id": { "type": ["string", "null"] }
+        "allow": {
+          "type": "boolean"
+        },
+        "human_approval_required": {
+          "type": "boolean"
+        },
+        "deny_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "policy_version": {
+          "type": "string"
+        },
+        "policy_input_digest": {
+          "type": "string"
+        },
+        "approval_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "approver_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "description": "Per-artifact JWS signature (M5.1, docs/DECISIONS.md ADR-012): the sender organization's Ed25519 signature over this artifact's canonicalized content plus iss/sub/aud/neg/typ/ver/hash/jti/exp claims. message_integrity.verify_artifact_proof requires its presence and validity before any business handler runs -- optional here because JSON Schema validates structure, not authentication.",
+      "required": [
+        "alg",
+        "kid",
+        "jws"
+      ],
+      "properties": {
+        "alg": {
+          "const": "EdDSA"
+        },
+        "kid": {
+          "type": "string"
+        },
+        "jws": {
+          "type": "string"
+        }
       }
     }
   },

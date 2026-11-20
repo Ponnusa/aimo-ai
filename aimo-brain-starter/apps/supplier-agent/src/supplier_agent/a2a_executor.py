@@ -30,7 +30,7 @@ from mcp_integration import McpToolError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from trade_protocol import NegotiationTransitionError
 
-from supplier_agent import commitment, negotiation
+from supplier_agent import commitment, message_auth, negotiation
 from supplier_agent.a2a_card import CHECK_AVAILABILITY_SKILL_ID
 from supplier_agent.mcp_client import fetch_availability_matches
 from supplier_agent.models import SupplierTaskRecord
@@ -53,8 +53,6 @@ _NEGOTIATION_HANDLERS = {
 }
 
 #: M5: authorization-evidence exchange and commitment artifact types.
-#: Handled separately from ``_NEGOTIATION_HANDLERS`` because they require
-#: the inbound message's bearer credential, not just the payload.
 _COMMITMENT_HANDLERS = {
     "authorization_evidence": (
         "authorization_evidence",
@@ -62,6 +60,12 @@ _COMMITMENT_HANDLERS = {
     ),
     "order_commit_request": ("order_commit_request", commitment.handle_order_commit_request),
 }
+
+#: Every artifact type requiring M5.1 message authentication — every
+#: negotiation and commitment type. ``product_availability_request``
+#: (M1) is deliberately excluded: it is not a negotiation-lifecycle or
+#: commitment message.
+_AUTHENTICATED_ARTIFACT_TYPES = frozenset({*_NEGOTIATION_HANDLERS, *_COMMITMENT_HANDLERS})
 
 
 def _extract_sender_agent_id(context: RequestContext) -> str | None:
@@ -112,21 +116,31 @@ class SupplierAgentExecutor(AgentExecutor):
             request_payload = data_parts[0]
             artifact_type = request_payload.get("type")
 
-            if artifact_type in _NEGOTIATION_HANDLERS:
-                schema_name, handler = _NEGOTIATION_HANDLERS[artifact_type]
+            if artifact_type in _AUTHENTICATED_ARTIFACT_TYPES:
+                schema_name, handler = (_NEGOTIATION_HANDLERS | _COMMITMENT_HANDLERS)[artifact_type]
                 validate_against_schema(schema_name, request_payload)
+                try:
+                    verified = await message_auth.verify_inbound_artifact(
+                        request_payload,
+                        settings=self._settings,
+                        session_factory=self._session_factory,
+                    )
+                except message_auth.MessageAuthenticationError as exc:
+                    await self._record(task.id, state="FAILED", counterparty_agent_id=counterparty)
+                    await updater.failed(
+                        message=new_text_message(f"Message authentication failed: {exc}")
+                    )
+                    return
                 response = await handler(
                     request_payload,
+                    verified=verified,
                     settings=self._settings,
                     session_factory=self._session_factory,
                 )
-            elif artifact_type in _COMMITMENT_HANDLERS:
-                schema_name, handler = _COMMITMENT_HANDLERS[artifact_type]
-                validate_against_schema(schema_name, request_payload)
-                response = await handler(
-                    request_payload,
+                response = message_auth.sign_outbound_artifact(
+                    response,
                     settings=self._settings,
-                    session_factory=self._session_factory,
+                    recipient_organization_id=verified.organization_id,
                 )
             else:
                 validate_against_schema("product_availability_request", request_payload)

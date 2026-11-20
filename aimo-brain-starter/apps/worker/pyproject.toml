@@ -7,6 +7,9 @@ dependencies = [
   "pydantic>=2.9.0",
   "pydantic-settings>=2.4.0",
   "agent-runtime",
+  "database",
+  "buyer-agent",
+  "supplier-agent",
 ]
 
 [build-system]

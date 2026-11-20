@@ -22,6 +22,7 @@ from dataclasses import dataclass
 import httpx
 import uvicorn
 from fastapi import FastAPI
+from message_integrity import generate_signing_keypair, private_key_to_pem, public_key_to_jwk
 
 
 @dataclass
@@ -76,3 +77,24 @@ def running_server(app: FastAPI, *, port: int) -> Iterator[RunningServer]:
         yield handle
     finally:
         handle.stop()
+
+
+async def generate_and_register_signing_key(
+    *, network_api_base_url: str, organization_id: str, admin_key: str, kid: str
+) -> str:
+    """M5.1 test helper: generate a fresh Ed25519 keypair, register its
+    public JWK with the real network-api server under test, and return
+    the private key PEM for the caller to set as that organization's
+    own agent's ``*_SIGNING_PRIVATE_KEY_PEM`` env var. Mirrors what
+    ``scripts/generate_signing_key.py`` does for a real deployment, but
+    end to end against a live test server rather than printed to a
+    terminal."""
+    private_key, public_key = generate_signing_keypair()
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{network_api_base_url}/organizations/{organization_id}/signing-keys",
+            json={"kid": kid, "public_key_jwk": public_key_to_jwk(public_key, kid=kid)},
+            headers={"X-Admin-Key": admin_key},
+        )
+    response.raise_for_status()
+    return private_key_to_pem(private_key)

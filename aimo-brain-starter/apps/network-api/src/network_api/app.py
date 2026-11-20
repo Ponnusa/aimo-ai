@@ -12,8 +12,9 @@ relationship lookup registry-api needs for discovery.
 
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
@@ -21,7 +22,11 @@ from sqlalchemy import select
 
 from database import new_engine, new_session_factory
 from identity import issue_service_credential
-from network_api.models import OrganizationRecord, TradingRelationshipRecord
+from network_api.models import (
+    OrganizationRecord,
+    OrganizationSigningKeyRecord,
+    TradingRelationshipRecord,
+)
 from network_api.settings import get_settings
 
 #: Every service credential minted by this endpoint grants exactly one of
@@ -33,33 +38,25 @@ from network_api.settings import get_settings
 AGENT_MANAGEMENT_SCOPE = "manage_agents"
 BUYER_TOOLS_SCOPE = "use_buyer_tools"
 SUPPLIER_TOOLS_SCOPE = "use_supplier_tools"
-#: M5 scopes. ``negotiate``/``commit`` bind to one ``agent_id`` — see
-#: docs/DECISIONS.md ADR-011: they authenticate which registered agent is
-#: sending a negotiation/authorization/commit A2A message, closing the
-#: M4 gap where only the unauthenticated payload's organization_id/
-#: sender_agent_id were checked. ``approve`` binds to one ``approver_id``
-#: (a pre-registered human approver stand-in — no OIDC yet).
-#: ``execute_order`` is the supplier-mcp execution tool's own narrow
-#: scope, separate from the read-only ``use_supplier_tools`` scope.
-NEGOTIATE_SCOPE = "negotiate"
-COMMIT_SCOPE = "commit"
-APPROVE_SCOPE = "approve"
+#: supplier-mcp's own narrow execution-tool scope (M5), separate from
+#: the read-only ``use_supplier_tools`` scope. Organization-scoped only
+#: (no agent_id binding) — this credential never crosses an
+#: organization boundary, unlike the M5 ``commit``/``negotiate``/
+#: ``approve`` scopes, which M5.1 removed in favor of per-artifact JWS
+#: signatures and a dev-OIDC-shaped approval token (see
+#: docs/DECISIONS.md ADR-012). The shared HMAC signing secret backing
+#: this mechanism remains appropriate here because it is intra-
+#: organization (an agent calling its own org's MCP server), not
+#: cross-organization.
 EXECUTE_ORDER_SCOPE = "execute_order"
 ALLOWED_SERVICE_CREDENTIAL_SCOPES = frozenset(
     {
         AGENT_MANAGEMENT_SCOPE,
         BUYER_TOOLS_SCOPE,
         SUPPLIER_TOOLS_SCOPE,
-        NEGOTIATE_SCOPE,
-        COMMIT_SCOPE,
-        APPROVE_SCOPE,
         EXECUTE_ORDER_SCOPE,
     }
 )
-#: Scopes that must be bound to one specific agent_id at issuance time.
-AGENT_BOUND_SCOPES = frozenset({NEGOTIATE_SCOPE, COMMIT_SCOPE})
-#: Scopes that must be bound to one specific approver_id at issuance time.
-APPROVER_BOUND_SCOPES = frozenset({APPROVE_SCOPE})
 
 
 class OrganizationOut(BaseModel):
@@ -76,8 +73,6 @@ class HealthOut(BaseModel):
 class ServiceCredentialRequest(BaseModel):
     ttl_seconds: int = 3600
     scope: str = AGENT_MANAGEMENT_SCOPE
-    agent_id: str | None = None
-    approver_id: str | None = None
 
 
 class ServiceCredentialOut(BaseModel):
@@ -85,8 +80,20 @@ class ServiceCredentialOut(BaseModel):
     organization_id: str
     scope: str
     expires_in_seconds: int
-    agent_id: str | None = None
-    approver_id: str | None = None
+
+
+class SigningKeyIn(BaseModel):
+    kid: str
+    public_key_jwk: dict[str, str]
+    validity_days: int = 365
+
+
+class SigningKeyOut(BaseModel):
+    organization_id: str
+    kid: str
+    status: str
+    not_before: str
+    not_after: str
 
 
 class RelationshipIn(BaseModel):
@@ -171,13 +178,6 @@ def create_app() -> FastAPI:
                     f"Allowed: {sorted(ALLOWED_SERVICE_CREDENTIAL_SCOPES)}."
                 ),
             )
-        if body.scope in AGENT_BOUND_SCOPES and not body.agent_id:
-            raise HTTPException(status_code=400, detail=f"Scope {body.scope!r} requires agent_id.")
-        if body.scope in APPROVER_BOUND_SCOPES and not body.approver_id:
-            raise HTTPException(
-                status_code=400, detail=f"Scope {body.scope!r} requires approver_id."
-            )
-
         async with session_factory() as session:
             org = await session.get(OrganizationRecord, organization_id)
             if org is None:
@@ -190,16 +190,12 @@ def create_app() -> FastAPI:
             scope=body.scope,
             signing_secret=settings.service_credential_signing_secret,
             ttl_seconds=body.ttl_seconds,
-            agent_id=body.agent_id if body.scope in AGENT_BOUND_SCOPES else None,
-            approver_id=body.approver_id if body.scope in APPROVER_BOUND_SCOPES else None,
         )
         return ServiceCredentialOut(
             token=token,
             organization_id=organization_id,
             scope=body.scope,
             expires_in_seconds=body.ttl_seconds,
-            agent_id=body.agent_id if body.scope in AGENT_BOUND_SCOPES else None,
-            approver_id=body.approver_id if body.scope in APPROVER_BOUND_SCOPES else None,
         )
 
     @app.post("/relationships", response_model=RelationshipOut)
@@ -326,6 +322,120 @@ def create_app() -> FastAPI:
                 )
                 for row in rows
             ]
+
+    @app.post("/organizations/{organization_id}/signing-keys", response_model=SigningKeyOut)
+    async def register_signing_key(
+        organization_id: str,
+        body: SigningKeyIn,
+        x_admin_key: str | None = Header(default=None),
+    ) -> SigningKeyOut:
+        """Register a *public* Ed25519 key (JWK, RFC 8037) for an
+        organization (M5.1). network-api never receives or stores a
+        private key — only ever this. The caller's own operator
+        generates the keypair out of band (see
+        ``scripts/generate_signing_key.py``) and registers only the
+        public half here, protected by the same admin key as every
+        other organization-management action.
+        """
+        _require_admin(x_admin_key, expected=settings.network_admin_api_key)
+        async with session_factory() as session:
+            if await session.get(OrganizationRecord, organization_id) is None:
+                raise HTTPException(
+                    status_code=404, detail=f"Organization {organization_id!r} does not exist."
+                )
+            existing = (
+                await session.execute(
+                    select(OrganizationSigningKeyRecord).where(
+                        OrganizationSigningKeyRecord.organization_id == organization_id,
+                        OrganizationSigningKeyRecord.kid == body.kid,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                raise HTTPException(
+                    status_code=409, detail=f"Key id {body.kid!r} is already registered."
+                )
+
+            now = datetime.now(UTC).replace(tzinfo=None)
+            record = OrganizationSigningKeyRecord(
+                organization_id=organization_id,
+                kid=body.kid,
+                public_key_jwk_json=json.dumps(body.public_key_jwk),
+                status="active",
+                not_before=now,
+                not_after=now + timedelta(days=body.validity_days),
+                created_at=now,
+                revoked_at=None,
+            )
+            session.add(record)
+            await session.commit()
+            return SigningKeyOut(
+                organization_id=organization_id,
+                kid=body.kid,
+                status=record.status,
+                not_before=record.not_before.isoformat(),
+                not_after=record.not_after.isoformat(),
+            )
+
+    @app.post(
+        "/organizations/{organization_id}/signing-keys/{kid}/revoke",
+        response_model=SigningKeyOut,
+    )
+    async def revoke_signing_key(
+        organization_id: str, kid: str, x_admin_key: str | None = Header(default=None)
+    ) -> SigningKeyOut:
+        """Immediate revocation: a revoked key is excluded from
+        ``/jwks.json`` on the very next request, regardless of its
+        ``not_after`` — the key compromise/rotation response this
+        endpoint exists for cannot wait out a validity window."""
+        _require_admin(x_admin_key, expected=settings.network_admin_api_key)
+        async with session_factory() as session:
+            record = (
+                await session.execute(
+                    select(OrganizationSigningKeyRecord).where(
+                        OrganizationSigningKeyRecord.organization_id == organization_id,
+                        OrganizationSigningKeyRecord.kid == kid,
+                    )
+                )
+            ).scalar_one_or_none()
+            if record is None:
+                raise HTTPException(status_code=404, detail="Signing key not found.")
+            record.status = "revoked"
+            record.revoked_at = datetime.now(UTC).replace(tzinfo=None)
+            await session.commit()
+            return SigningKeyOut(
+                organization_id=organization_id,
+                kid=kid,
+                status=record.status,
+                not_before=record.not_before.isoformat(),
+                not_after=record.not_after.isoformat(),
+            )
+
+    @app.get("/organizations/{organization_id}/jwks.json")
+    async def get_jwks(organization_id: str) -> dict[str, list[dict[str, str]]]:
+        """Public, unauthenticated: a standard JWKS (RFC 7517) of every
+        currently valid (``active``/``rotating``, not revoked, within
+        its validity window) key for this organization. This is the
+        *only* cross-organization identity material network-api ever
+        serves — losing this endpoint's data to an attacker lets them
+        read public keys, never forge a signature."""
+        now = datetime.now(UTC).replace(tzinfo=None)
+        async with session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(OrganizationSigningKeyRecord).where(
+                            OrganizationSigningKeyRecord.organization_id == organization_id,
+                            OrganizationSigningKeyRecord.status != "revoked",
+                            OrganizationSigningKeyRecord.not_before <= now,
+                            OrganizationSigningKeyRecord.not_after >= now,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return {"keys": [json.loads(row.public_key_jwk_json) for row in rows]}
 
     return app
 

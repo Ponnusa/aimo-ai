@@ -43,6 +43,26 @@ and replies with `order_confirmation`. `TradeState.AUTHORIZED` through
 `COMMITTED` are now real, reachable states — gated on independent policy
 decisions, not a default or an LLM's own judgement.
 
+As of M5.1 (see `docs/DECISIONS.md` ADR-012), every negotiation and
+commitment artifact — not just M5's three authorization/commitment
+types — carries a per-artifact JWS `proof` (`packages/message-integrity`),
+signed with the sending organization's own Ed25519 key and verified by
+the receiver against that organization's published JWKS before any
+business handler runs. `network-api` publishes public JWKS only
+(`GET /organizations/{id}/jwks.json`) and never again holds a secret
+whose compromise lets anyone forge a message for another organization —
+replacing M5's shared-HMAC-secret `commit`/`negotiate`/`approve`
+credentials entirely. `registry-api` gained a direction-agnostic
+`GET /agents/{id}/verify-sender` so either side (not only the buyer, as
+M2's discovery endpoint assumes) can confirm a verified sender is a
+registered, active agent with an active trading relationship. Human
+approval now runs through a clearly-labeled development identity
+adapter (`identity.dev_oidc`) rather than a bare credential, refused
+outright outside local/staging. `apps/worker` is real for the first
+time: a role-parameterized (`WORKER_ROLE=buyer|supplier`) process that
+retries a crashed/ambiguous buyer-side commit by re-invoking the same
+idempotent entry point a live request already uses.
+
 ```mermaid
 flowchart TB
   P[Next.js Management Portal] --> N[Network API]
@@ -70,13 +90,13 @@ In a managed environment, separate Neon databases or rigorously isolated schemas
 
 ## Deployables
 
-- `apps/network-api`: organization identities, organization-level trading relationships, short-lived organization-scoped service-credential issuance, public protocol schemas.
+- `apps/network-api`: organization identities, organization-level trading relationships, short-lived organization-scoped service-credential issuance (intra-organization scopes only as of M5.1), public protocol schemas, and — as of M5.1 — each organization's public signing-key directory (`organization_signing_keys`, `GET /organizations/{id}/jwks.json`). Never receives or stores a private key.
 - `apps/registry-api`: agent registration, Agent Card fetch/validation (SSRF-safe), capability indexing, endpoint-ownership verification, agent lifecycle (pending/active/suspended/revoked), capability-indexed discovery (gated by a trading relationship looked up from network-api), registry audit trail. Never proxies an A2A conversation — discovery returns the real A2A endpoint URL, and agents talk to each other directly.
 - `apps/buyer-agent`: independent A2A endpoint, LangGraph workflow, buyer MCP client (calls `apps/buyer-mcp` only), nonbinding RFQ/counteroffer negotiation (M4, own negotiation/proposal tables), independent OPA policy evaluation, durable human approval and authorization-evidence exchange (M5, own `buyer_approvals`/`buyer_authorization_evidence`/`buyer_orders` tables), and private state.
 - `apps/supplier-agent`: independent A2A endpoint, LangGraph workflow, supplier MCP client (calls `apps/supplier-mcp` only), nonbinding quote/counteroffer negotiation (M4, own negotiation/proposal tables plus an inbound-artifact replay-dedup cache), independent OPA policy evaluation, durable human approval and authorization-evidence exchange, and commitment handling that calls its own `supplier-mcp`'s execution tool (M5, own `supplier_approvals`/`supplier_authorization_evidence`/`supplier_orders` tables), and private state.
 - `apps/buyer-mcp`: buyer organization's own MCP tool server (purchase requirements, budget, approved suppliers, purchase approval — a mock decision, not OPA). Independently deployable; own database (tool-invocation audit log); scoped-credential-authenticated; never serves any other organization.
 - `apps/supplier-mcp`: supplier organization's own MCP tool server (catalogue search, inventory, customer price, delivery options — read-only, `use_supplier_tools` scope). As of M5, also exposes `execute_order`/`get_order_status` (the approved mock order adapter), gated by a separate, narrower `execute_order` scope and backed by its own `supplier_mcp_orders` table with a UNIQUE `idempotency_key` constraint — the actual idempotency authority for commits, independent of supplier-agent's own audit copy. Independently deployable; own database; scoped-credential-authenticated; never serves any other organization.
-- `apps/worker`: retry, timeout, inbox/outbox dispatch and reconciliation. Scaffolded in M0–M4; still a scaffold after M5 — the M5 commitment flow is invoked synchronously by `buyer-agent` itself (`buyer_agent.commitment.run_authorization_and_commitment`), idempotently re-callable, which is what a future worker would schedule. Implementing the actual scheduled dispatcher/reconciler loop is explicit follow-up work, not claimed as done here.
+- `apps/worker`: retry, timeout, inbox/outbox dispatch and reconciliation. Scaffolded in M0–M4; real as of M5.1 — role-parameterized (`WORKER_ROLE=buyer|supplier`, one deployment per organization, each against only its own agent's database), it retries a buyer-side commit stuck in `COMMITTING`/`RECONCILIATION_REQUIRED` past a backoff, bounded by a durable per-row attempt count, by re-invoking `buyer_agent.commitment.run_authorization_and_commitment` — the same idempotent entry point a live request uses, never a separate "worker version" of the logic. The supplier role is currently a documented no-op (supplier-side commit handling is synchronous/request-driven and already reports `RECONCILIATION_REQUIRED` on an ambiguous outcome).
 - `packages/policy-engine`: industry-independent OPA evaluation (M5) — a bounded `opa eval` CLI subprocess wrapper (never a long-running server in this implementation, despite the original `services/opa` box below), canonical input hashing and deny-by-default decisions. `packages/authorization` builds the generic policy input and calls this. Only `industries/food-wholesale/policies/{buyer,supplier}/v1/` (rego + data.json) hold actual business rules; the core package never sees a SKU, a margin, or a budget number.
 - `apps/portal`: Next.js management UI; Vercel.
 - `services/opa` *(design note, not yet built this way)*: the original plan was an OPA server sidecar per organization. M5 ships the equivalent bounded-subprocess form (`packages/policy-engine` above) instead, to avoid a new always-running service for a single-process `opa eval` call; a production/customer-hosted deployment can swap in `opa run --server` behind the same `evaluate_policy()` interface without changing callers.
@@ -105,6 +125,7 @@ aimo-brain/
     audit/
     database/
     policy-engine/
+    message-integrity/
   industries/
     food-wholesale/
       schemas/

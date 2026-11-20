@@ -60,26 +60,6 @@ class BuyerAgentSettings(ServiceSettings):
         validation_alias="BUYER_MCP_SERVICE_CREDENTIAL",
     )
 
-    # M5: authorization/commitment. ``buyer_commit_service_credential`` is
-    # a pre-minted, agent-scoped "commit" credential (network-api,
-    # agent_id=buyer_agent_id), provided to this agent's operator out of
-    # band — same pattern as buyer_mcp_service_credential above. It is
-    # attached as a bearer token on every authorization_evidence/
-    # order_commit_request A2A message this agent sends, so the
-    # supplier can cryptographically verify which agent sent it rather
-    # than trusting the payload's organization_id/sender_agent_id alone.
-    buyer_commit_service_credential: str = Field(
-        default="",
-        validation_alias="BUYER_COMMIT_SERVICE_CREDENTIAL",
-    )
-    # Must match network-api's (and the supplier's) signing secret
-    # exactly — this is how this agent verifies an inbound bearer
-    # credential and an approver's "approve"-scoped credential, without a
-    # live call back to network-api.
-    service_credential_signing_secret: str = Field(
-        default="dev-only-signing-secret-change-me",
-        validation_alias="SERVICE_CREDENTIAL_SIGNING_SECRET",
-    )
     # This organization's own versioned OPA bundle (food-wholesale owns
     # the actual bundle contents — see
     # food_wholesale.policies.policy_bundle_dir).
@@ -89,6 +69,29 @@ class BuyerAgentSettings(ServiceSettings):
     )
     # Path to the real OPA CLI binary, resolved via PATH by default.
     opa_binary: str = Field(default="opa", validation_alias="OPA_BINARY")
+
+    # M5.1: per-artifact JWS signing (docs/DECISIONS.md ADR-012). This
+    # organization's own Ed25519 private key (PEM) and its current kid,
+    # generated out of band (``scripts/generate_signing_key.py``) and
+    # provided to this agent's operator — never minted or held by
+    # network-api, which only ever receives the matching *public* JWK.
+    # Replaces M5's cross-organization HMAC "commit"/"negotiate"
+    # credentials entirely.
+    buyer_signing_private_key_pem: str = Field(
+        default="",
+        validation_alias="BUYER_SIGNING_PRIVATE_KEY_PEM",
+    )
+    buyer_signing_kid: str = Field(
+        default="",
+        validation_alias="BUYER_SIGNING_KID",
+    )
+    # Needed to resolve a counterparty's public JWKS for message-proof
+    # verification (M5.1) — this agent never called network-api
+    # directly before.
+    network_api_url: str = Field(
+        default="http://localhost:8000",
+        validation_alias="NETWORK_API_URL",
+    )
 
 
 @lru_cache

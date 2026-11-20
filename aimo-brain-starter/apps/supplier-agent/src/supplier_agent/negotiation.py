@@ -31,6 +31,7 @@ from food_wholesale.negotiation import (
     build_reject_proposal,
     evaluate_counterproposal,
 )
+from message_integrity import VerifiedProof
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from trade_protocol import TradeState
 
@@ -59,15 +60,21 @@ class UnauthorizedCounterpartyError(NegotiationError):
     cross-tenant data/authority violation (docs/SECURITY.md)."""
 
 
-def _verify_counterparty(negotiation: Any, payload: dict[str, Any]) -> None:
+def _verify_counterparty(negotiation: Any, verified: VerifiedProof) -> None:
+    """``verified`` is the already-cryptographically-verified sender of
+    the inbound artifact (M5.1) — checked here only for whether it
+    matches *this* negotiation's actual recorded counterparty, never
+    re-deriving identity from the unauthenticated payload fields
+    (closing the M4 ADR-010 gap: this used to compare raw payload
+    fields, not a verified signature)."""
     if (
-        payload["organization_id"] != negotiation.counterparty_organization_id
-        or payload["sender_agent_id"] != negotiation.counterparty_agent_id
+        verified.organization_id != negotiation.counterparty_organization_id
+        or verified.agent_id != negotiation.counterparty_agent_id
     ):
         raise UnauthorizedCounterpartyError(
-            f"Artifact claims organization_id={payload['organization_id']!r}/"
-            f"sender_agent_id={payload['sender_agent_id']!r}, but negotiation "
-            f"{payload['transaction_id']!r} belongs to "
+            f"Verified sender organization_id={verified.organization_id!r}/"
+            f"agent_id={verified.agent_id!r}, but negotiation "
+            f"{verified.negotiation_id!r} belongs to "
             f"{negotiation.counterparty_organization_id!r}/"
             f"{negotiation.counterparty_agent_id!r}."
         )
@@ -92,12 +99,17 @@ async def _explain_counteroffer(*, llm_provider: str, countered_lines: list[dict
 async def handle_request_for_quote(
     payload: dict[str, Any],
     *,
+    verified: VerifiedProof,
     settings: SupplierAgentSettings,
     session_factory: async_sessionmaker,
 ) -> dict[str, Any]:
     negotiation_id = payload["transaction_id"]
-    buyer_organization_id = payload["organization_id"]
-    buyer_agent_id = payload["sender_agent_id"]
+    # The negotiation's recorded counterparty is the cryptographically
+    # verified sender, not the unauthenticated payload fields (M5.1) —
+    # this is the identity every later message in this negotiation gets
+    # checked against (``_verify_counterparty``).
+    buyer_organization_id = verified.organization_id
+    buyer_agent_id = verified.agent_id
 
     cached = await negotiation_store.check_replay(session_factory, payload["artifact_id"])
     if cached is not None:
@@ -182,6 +194,7 @@ async def handle_request_for_quote(
 async def handle_counterproposal(
     payload: dict[str, Any],
     *,
+    verified: VerifiedProof,
     settings: SupplierAgentSettings,
     session_factory: async_sessionmaker,
 ) -> dict[str, Any]:
@@ -195,7 +208,7 @@ async def handle_counterproposal(
     negotiation = await negotiation_store.get_negotiation(session_factory, negotiation_id)
     if negotiation is None:
         raise NegotiationError(f"Unknown negotiation_id {negotiation_id!r}.")
-    _verify_counterparty(negotiation, payload)
+    _verify_counterparty(negotiation, verified)
 
     previous_proposal_id = negotiation.current_proposal_id
     next_round = negotiation.round_number + 1
@@ -296,6 +309,7 @@ async def handle_counterproposal(
 async def handle_accept_proposal(
     payload: dict[str, Any],
     *,
+    verified: VerifiedProof,
     settings: SupplierAgentSettings,
     session_factory: async_sessionmaker,
 ) -> dict[str, Any]:
@@ -309,7 +323,7 @@ async def handle_accept_proposal(
     negotiation = await negotiation_store.get_negotiation(session_factory, negotiation_id)
     if negotiation is None:
         raise NegotiationError(f"Unknown negotiation_id {negotiation_id!r}.")
-    _verify_counterparty(negotiation, payload)
+    _verify_counterparty(negotiation, verified)
 
     accepted_proposal_id = payload["payload"]["accepted_proposal_id"]
     accepted_content_hash = payload["payload"]["accepted_content_hash"]
@@ -361,6 +375,7 @@ async def handle_accept_proposal(
 async def handle_reject_proposal(
     payload: dict[str, Any],
     *,
+    verified: VerifiedProof,
     settings: SupplierAgentSettings,
     session_factory: async_sessionmaker,
 ) -> dict[str, Any]:
@@ -374,7 +389,7 @@ async def handle_reject_proposal(
     negotiation = await negotiation_store.get_negotiation(session_factory, negotiation_id)
     if negotiation is None:
         raise NegotiationError(f"Unknown negotiation_id {negotiation_id!r}.")
-    _verify_counterparty(negotiation, payload)
+    _verify_counterparty(negotiation, verified)
 
     response = build_reject_proposal(
         artifact_id=str(uuid.uuid4()),

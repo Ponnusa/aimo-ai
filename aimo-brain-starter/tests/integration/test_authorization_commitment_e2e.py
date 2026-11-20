@@ -42,7 +42,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from database import new_engine
 from identity import issue_service_credential
 
-from .a2a_server_harness import find_free_port, running_server
+from .a2a_server_harness import find_free_port, generate_and_register_signing_key, running_server
 
 pytestmark = pytest.mark.skipif(shutil.which("opa") is None, reason="opa binary not installed")
 
@@ -54,6 +54,8 @@ SUPPLIER_AGENT_ID = "agent_fictional_supplier_01"
 SIGNING_SECRET = "e2e-m5-signing-secret"
 ADMIN_KEY = "e2e-m5-admin-key"
 INTERNAL_KEY = "e2e-m5-internal-key"
+BUYER_KID = "e2e-m5-buyer-k1"
+SUPPLIER_KID = "e2e-m5-supplier-k1"
 
 
 def _fresh_sqlite_url(label: str) -> str:
@@ -72,7 +74,11 @@ async def _create_tables(engine, *models) -> None:
 def _build_network_app(*, database_url: str):
     import network_api.app as network_app_module
     import network_api.settings as network_settings_module
-    from network_api.models import OrganizationRecord, TradingRelationshipRecord
+    from network_api.models import (
+        OrganizationRecord,
+        OrganizationSigningKeyRecord,
+        TradingRelationshipRecord,
+    )
 
     os.environ["DATABASE_URL"] = database_url
     os.environ["NETWORK_ADMIN_API_KEY"] = ADMIN_KEY
@@ -81,7 +87,7 @@ def _build_network_app(*, database_url: str):
     network_settings_module.get_settings.cache_clear()
 
     app = network_app_module.create_app()
-    return app, (OrganizationRecord, TradingRelationshipRecord)
+    return app, (OrganizationRecord, TradingRelationshipRecord, OrganizationSigningKeyRecord)
 
 
 def _build_registry_app(*, database_url: str, network_api_url: str):
@@ -137,7 +143,15 @@ def _build_buyer_mcp_app(*, database_url: str):
     return buyer_mcp_app_module.create_app(), BuyerMcpToolInvocationRecord
 
 
-def _build_supplier_app(*, a2a_url: str, database_url: str, supplier_mcp_url: str):
+def _build_supplier_app(
+    *,
+    a2a_url: str,
+    database_url: str,
+    supplier_mcp_url: str,
+    network_api_url: str,
+    registry_api_url: str,
+    signing_private_key_pem: str,
+):
     import supplier_agent.app as supplier_app_module
     import supplier_agent.settings as supplier_settings_module
     from supplier_agent.models import (
@@ -147,6 +161,7 @@ def _build_supplier_app(*, a2a_url: str, database_url: str, supplier_mcp_url: st
         SupplierOrderRecord,
         SupplierProcessedArtifactRecord,
         SupplierProposalRecord,
+        SupplierSeenMessageProofRecord,
         SupplierTaskRecord,
     )
 
@@ -162,12 +177,10 @@ def _build_supplier_app(*, a2a_url: str, database_url: str, supplier_mcp_url: st
         organization_id=SUPPLIER_ORG, scope="execute_order", signing_secret=SIGNING_SECRET
     )
     os.environ["SERVICE_CREDENTIAL_SIGNING_SECRET"] = SIGNING_SECRET
-    os.environ["SUPPLIER_COMMIT_SERVICE_CREDENTIAL"] = issue_service_credential(
-        organization_id=SUPPLIER_ORG,
-        scope="commit",
-        signing_secret=SIGNING_SECRET,
-        agent_id=SUPPLIER_AGENT_ID,
-    )
+    os.environ["NETWORK_API_URL"] = network_api_url
+    os.environ["REGISTRY_API_URL"] = registry_api_url
+    os.environ["SUPPLIER_SIGNING_PRIVATE_KEY_PEM"] = signing_private_key_pem
+    os.environ["SUPPLIER_SIGNING_KID"] = SUPPLIER_KID
     supplier_settings_module.get_settings.cache_clear()
 
     app = supplier_app_module.create_app()
@@ -179,10 +192,19 @@ def _build_supplier_app(*, a2a_url: str, database_url: str, supplier_mcp_url: st
         SupplierApprovalRecord,
         SupplierAuthorizationEvidenceRecord,
         SupplierOrderRecord,
+        SupplierSeenMessageProofRecord,
     )
 
 
-def _build_buyer_app(*, a2a_url: str, database_url: str, registry_api_url: str, buyer_mcp_url: str):
+def _build_buyer_app(
+    *,
+    a2a_url: str,
+    database_url: str,
+    registry_api_url: str,
+    buyer_mcp_url: str,
+    network_api_url: str,
+    signing_private_key_pem: str,
+):
     import buyer_agent.app as buyer_app_module
     import buyer_agent.settings as buyer_settings_module
     from buyer_agent.models import (
@@ -191,6 +213,7 @@ def _build_buyer_app(*, a2a_url: str, database_url: str, registry_api_url: str, 
         BuyerNegotiationRecord,
         BuyerOrderRecord,
         BuyerProposalRecord,
+        BuyerSeenMessageProofRecord,
         BuyerTaskRecord,
     )
 
@@ -203,13 +226,9 @@ def _build_buyer_app(*, a2a_url: str, database_url: str, registry_api_url: str, 
     os.environ["BUYER_MCP_SERVICE_CREDENTIAL"] = issue_service_credential(
         organization_id=BUYER_ORG, scope="use_buyer_tools", signing_secret=SIGNING_SECRET
     )
-    os.environ["SERVICE_CREDENTIAL_SIGNING_SECRET"] = SIGNING_SECRET
-    os.environ["BUYER_COMMIT_SERVICE_CREDENTIAL"] = issue_service_credential(
-        organization_id=BUYER_ORG,
-        scope="commit",
-        signing_secret=SIGNING_SECRET,
-        agent_id=BUYER_AGENT_ID,
-    )
+    os.environ["NETWORK_API_URL"] = network_api_url
+    os.environ["BUYER_SIGNING_PRIVATE_KEY_PEM"] = signing_private_key_pem
+    os.environ["BUYER_SIGNING_KID"] = BUYER_KID
     buyer_settings_module.get_settings.cache_clear()
 
     app = buyer_app_module.create_app()
@@ -220,6 +239,7 @@ def _build_buyer_app(*, a2a_url: str, database_url: str, registry_api_url: str, 
         BuyerApprovalRecord,
         BuyerAuthorizationEvidenceRecord,
         BuyerOrderRecord,
+        BuyerSeenMessageProofRecord,
     )
 
 
@@ -262,12 +282,19 @@ async def registry_server(network_server):
 
 
 @pytest.fixture
-async def supplier_server():
+async def supplier_server(registry_server, network_server):
     mcp_database_url = _fresh_sqlite_url("supplier_mcp")
     mcp_app, mcp_models = _build_supplier_mcp_app(database_url=mcp_database_url)
     mcp_engine = new_engine(mcp_database_url)
     await _create_tables(mcp_engine, *mcp_models)
     await mcp_engine.dispose()
+
+    signing_private_key_pem = await generate_and_register_signing_key(
+        network_api_base_url=network_server.base_url,
+        organization_id=SUPPLIER_ORG,
+        admin_key=ADMIN_KEY,
+        kid=SUPPLIER_KID,
+    )
 
     mcp_port = find_free_port()
     with running_server(mcp_app, port=mcp_port) as mcp_server:
@@ -278,6 +305,9 @@ async def supplier_server():
             a2a_url=a2a_url,
             database_url=database_url,
             supplier_mcp_url=f"{mcp_server.base_url}/mcp",
+            network_api_url=network_server.base_url,
+            registry_api_url=registry_server.base_url,
+            signing_private_key_pem=signing_private_key_pem,
         )
 
         engine = new_engine(database_url)
@@ -290,12 +320,19 @@ async def supplier_server():
 
 
 @pytest.fixture
-async def buyer_server(registry_server):
+async def buyer_server(registry_server, network_server):
     mcp_database_url = _fresh_sqlite_url("buyer_mcp")
     mcp_app, mcp_model = _build_buyer_mcp_app(database_url=mcp_database_url)
     mcp_engine = new_engine(mcp_database_url)
     await _create_tables(mcp_engine, mcp_model)
     await mcp_engine.dispose()
+
+    signing_private_key_pem = await generate_and_register_signing_key(
+        network_api_base_url=network_server.base_url,
+        organization_id=BUYER_ORG,
+        admin_key=ADMIN_KEY,
+        kid=BUYER_KID,
+    )
 
     mcp_port = find_free_port()
     with running_server(mcp_app, port=mcp_port) as mcp_server:
@@ -307,6 +344,8 @@ async def buyer_server(registry_server):
             database_url=database_url,
             registry_api_url=registry_server.base_url,
             buyer_mcp_url=f"{mcp_server.base_url}/mcp",
+            network_api_url=network_server.base_url,
+            signing_private_key_pem=signing_private_key_pem,
         )
 
         engine = new_engine(database_url)
@@ -376,6 +415,44 @@ async def _register_and_verify_supplier(*, registry_server, supplier_server, tok
         assert confirm.json()["status"] == "active"
 
 
+async def _register_and_verify_buyer(*, registry_server, buyer_server, token: str) -> None:
+    """As of M5.1, the buyer must also be a registered, active agent —
+    not just the discovered supplier — since the supplier's
+    ``verify_agent_is_registered_and_related`` check now applies to
+    every verified sender, buyer included."""
+    async with httpx.AsyncClient() as client:
+        register = await client.post(
+            f"{registry_server.base_url}/agents",
+            json={
+                "agent_id": BUYER_AGENT_ID,
+                "organization_id": BUYER_ORG,
+                "a2a_card_url": buyer_server.base_url,
+            },
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert register.status_code == 200, register.text
+
+        start = await client.post(
+            f"{registry_server.base_url}/agents/{BUYER_AGENT_ID}/verification/start",
+            params={"organization_id": BUYER_ORG},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        challenge = start.json()["challenge"]
+
+        await client.put(
+            f"{buyer_server.base_url}/internal/ownership-challenge",
+            json={"challenge": challenge},
+        )
+
+        confirm = await client.post(
+            f"{registry_server.base_url}/agents/{BUYER_AGENT_ID}/verification/confirm",
+            params={"organization_id": BUYER_ORG},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert confirm.status_code == 200, confirm.text
+        assert confirm.json()["status"] == "active"
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_full_authorization_and_commitment_flow(
@@ -385,6 +462,10 @@ async def test_full_authorization_and_commitment_flow(
     await _create_relationship(network_server)
     await _register_and_verify_supplier(
         registry_server=registry_server, supplier_server=supplier_server, token=token
+    )
+    buyer_token = await _mint_credential(network_server, BUYER_ORG)
+    await _register_and_verify_buyer(
+        registry_server=registry_server, buyer_server=buyer_server, token=buyer_token
     )
 
     from buyer_agent.client import negotiate_purchase_via_registry

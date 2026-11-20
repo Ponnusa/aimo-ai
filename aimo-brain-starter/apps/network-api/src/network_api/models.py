@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database import Base
@@ -49,3 +49,26 @@ class TradingRelationshipRecord(Base):
     status: Mapped[str] = mapped_column(String, nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class OrganizationSigningKeyRecord(Base):
+    """One organization's own Ed25519 *public* key (M5.1). network-api
+    never stores or sees a private key — only the public half, which is
+    enough to let any other organization verify a signature, never to
+    forge one. ``GET /organizations/{id}/jwks.json`` serves every row
+    with ``status in ("active", "rotating")`` and within its validity
+    window as a standard JWKS; a revoked key is excluded immediately,
+    not merely expired on schedule."""
+
+    __tablename__ = "organization_signing_keys"
+    __table_args__ = (UniqueConstraint("organization_id", "kid", name="uq_org_signing_key_kid"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    organization_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    kid: Mapped[str] = mapped_column(String, nullable=False)
+    public_key_jwk_json: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="active")
+    not_before: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    not_after: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

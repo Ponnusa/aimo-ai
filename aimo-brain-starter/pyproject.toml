@@ -33,6 +33,7 @@ members = [
   "packages/audit",
   "packages/database",
   "packages/policy-engine",
+  "packages/message-integrity",
   "industries/food-wholesale",
 ]
 
@@ -46,7 +47,10 @@ trade-protocol = { workspace = true }
 audit = { workspace = true }
 database = { workspace = true }
 policy-engine = { workspace = true }
+message-integrity = { workspace = true }
 aimo-food-wholesale = { workspace = true }
+buyer-agent = { workspace = true }
+supplier-agent = { workspace = true }
 
 [tool.ruff]
 line-length = 100
@@ -84,6 +88,7 @@ testpaths = [
   "packages/audit/tests",
   "packages/database/tests",
   "packages/policy-engine/tests",
+  "packages/message-integrity/tests",
   "industries/food-wholesale/tests",
   "tests",
 ]

@@ -52,19 +52,6 @@ class SupplierAgentSettings(ServiceSettings):
         validation_alias="SUPPLIER_MCP_SERVICE_CREDENTIAL",
     )
 
-    # M5: authorization/commitment. ``supplier_commit_service_credential``
-    # is a pre-minted, agent-scoped "commit" credential (network-api,
-    # agent_id=supplier_agent_id) attached to every authorization_evidence/
-    # order_confirmation A2A message this agent sends — see the matching
-    # field docstring on buyer_agent.settings.
-    supplier_commit_service_credential: str = Field(
-        default="",
-        validation_alias="SUPPLIER_COMMIT_SERVICE_CREDENTIAL",
-    )
-    service_credential_signing_secret: str = Field(
-        default="dev-only-signing-secret-change-me",
-        validation_alias="SERVICE_CREDENTIAL_SIGNING_SECRET",
-    )
     supplier_policy_version: str = Field(
         default="v1",
         validation_alias="SUPPLIER_POLICY_VERSION",
@@ -79,6 +66,31 @@ class SupplierAgentSettings(ServiceSettings):
     supplier_mcp_execution_credential: str = Field(
         default="",
         validation_alias="SUPPLIER_MCP_EXECUTION_CREDENTIAL",
+    )
+
+    # M5.1: per-artifact JWS signing (docs/DECISIONS.md ADR-012) — see
+    # the matching field docstring on buyer_agent.settings. Replaces
+    # M5's cross-organization HMAC "commit"/"negotiate" credentials
+    # entirely.
+    supplier_signing_private_key_pem: str = Field(
+        default="",
+        validation_alias="SUPPLIER_SIGNING_PRIVATE_KEY_PEM",
+    )
+    supplier_signing_kid: str = Field(
+        default="",
+        validation_alias="SUPPLIER_SIGNING_KID",
+    )
+    network_api_url: str = Field(
+        default="http://localhost:8000",
+        validation_alias="NETWORK_API_URL",
+    )
+    # M5.1: registry-api lookup to confirm an inbound message's verified
+    # sender is a registered, active agent with an active trading
+    # relationship (this agent never called registry-api directly
+    # before — only buyer-agent discovered through it).
+    registry_api_url: str = Field(
+        default="http://localhost:8003",
+        validation_alias="REGISTRY_API_URL",
     )
 
 

@@ -36,74 +36,122 @@
 8. Failed/retried order submission resolves via reconciliation without silent duplication.
 9. Logs and traces do not contain secrets or unnecessary customer-specific pricing.
 
-## M5: authorization/commitment trust model and residual limitations
+## M5.1: per-artifact signature trust model and residual limitations
 
-**What M5 actually verifies.** `authorization_evidence`/`order_commit_request`/
-`order_confirmation` artifacts carry the sender's agent-scoped `commit`
-service credential (network-api issued, bound to one `organization_id`
-and one `agent_id`) inside the payload itself. The receiver always
-verifies this credential's signature, expiry, scope, organization and
-agent binding *before* trusting the artifact's own `organization_id`/
-`sender_agent_id` fields at all — closing the gap M4's ADR-010 left,
-where only the unauthenticated payload fields were checked. A commit can
-only proceed once an organization independently holds `allow=True`
-evidence from *both* sides for the exact same `content_hash`
-(`authorization.is_mutually_authorized`), each produced by that
-organization's own, separately invoked OPA decision.
+**What M5.1 actually verifies — every negotiation/authorization/
+commitment artifact, not just M5's three.** `request_for_quote`,
+`quote`, `counterproposal`, `accept_proposal`, `reject_proposal`,
+`proposed_agreement`, `authorization_evidence`, `order_commit_request`
+and `order_confirmation` all carry a `proof` object: a JWS whose signed
+payload binds `iss`/`sub` (sender organization/agent), `aud` (intended
+recipient organization), `neg`/`typ`/`ver`/`hash` (negotiation id,
+artifact type, version, content_hash — redundant with, but checked
+separately from, the digest below), `artifact_digest` (sha256 of the
+canonicalized artifact content, so *any* field changed after signing is
+detected, not just the ones named in explicit claims), and a `jti`
+(unique per signed message, checked against a durable per-organization
+table so the exact same signed bytes can never be replayed). The
+receiver verifies, in order: signature validity against the issuer's
+published JWKS -> digest match (tamper detection) -> explicit claim
+match (scope/participant sanity) -> expiry -> replay -> the claimed
+sender is a registered, `active` agent of the claimed organization with
+an active trading relationship to the verifier
+(`GET /agents/{id}/verify-sender`, registry-api) -> (once the
+negotiation already has a recorded counterparty) the verified sender
+matches it exactly. Only after all of this does any business handler
+run. This closes the gap M4's ADR-010 left (payload-only sender checks)
+for *every* artifact type, not only M5's authorization/commitment ones —
+unlike M5, which signed only its own three new types.
 
-**Explicitly not covered by M5 — do not claim otherwise.** M4's
-negotiation artifacts themselves (`request_for_quote`/`quote`/
-`counterproposal`/`accept_proposal`/`reject_proposal`) still rely on the
-unauthenticated payload fields the same way M4 left them; only the new
-M5 authorization/commitment artifacts carry a verified credential. An
-attacker can still waste a supplier's compute with a spoofed RFQ, but
-cannot reach `AUTHORIZED` or `COMMITTED` without presenting a real,
-agent-scoped credential. Retrofitting credential verification onto the
-M4 negotiation messages too is a documented follow-up, not done here.
+**The cross-organization trust root is now asymmetric, not a shared
+secret.** Each organization holds its own Ed25519 private key, generated
+out of band (`scripts/generate_signing_key.py`) and never transmitted
+anywhere. `network-api` publishes only the matching *public* JWKS
+(`GET /organizations/{id}/jwks.json`) — it never receives or stores a
+private key, so compromising `network-api`'s own data lets an attacker
+read public keys, never forge a signature for an organization whose
+private key they do not hold. This replaces M5's shared
+`SERVICE_CREDENTIAL_SIGNING_SECRET` HMAC trust root for cross-organization
+authentication entirely (the HMAC mechanism itself remains in use for
+the *intra*-organization boundaries it was always appropriate for:
+`use_buyer_tools`/`use_supplier_tools`/`execute_order`/`manage_agents`,
+none of which ever cross an organization boundary).
 
-**The cross-organization credential trust root is a shared secret, not
-independent PKI.** Every service in this deployment — network-api,
-registry-api, both MCP servers, and now both agents' `commit`/`approve`
-credentials — verifies HMAC signatures against one shared
-`SERVICE_CREDENTIAL_SIGNING_SECRET`. This is deliberate for a
-managed/single-deployment reference implementation (network-api is the
-one network-wide identity authority both organizations already trust
-per `PROJECT.md`'s "network operator" role), but it is **not** real
-multi-organization federation: any party who learns the shared secret
-can forge a credential for *any* organization. A production,
-independently-hosted multi-organization deployment needs each
-organization to hold its own cryptographic identity — per-organization
-signed JWTs with a published JWKS, or mutual TLS client certificates —
-with `network-api`/the registry acting as a trust anchor/directory,
-never as the one party whose secret everyone shares. This is not yet
-built and must not be described as production-grade verified business
-identity.
+**Residual limitation: organization-level, not per-agent, keys.** One
+keypair signs for an entire organization; the JWT's `sub` claim
+(org-vouched, not independently cryptographically bound) names which
+agent used it. A compromised agent process can therefore sign on behalf
+of its whole organization, not just itself. Acceptable while each
+organization runs exactly one agent per role in this reference
+deployment; per-agent keys are a natural extension, not yet built.
 
-**Human approval is simulated, not real OIDC/MFA.** An `approve`-scoped
-credential binds to one pre-registered `approver_id`, issued the same
-way as any other service credential (an operator mints it out of band
-via network-api's admin-key-protected endpoint). There is no human
-login, session, SSO or MFA behind it — that remains M6/M7 scope. An
-approval is bound to one exact `(negotiation_id, content_hash)` pair; a
-revised proposal (different content_hash) always requires a new
-approval, and an approval can never be reused across hashes.
+**Residual limitation: key distribution still depends on network-api's
+availability and honesty for discovery, not forgery.** A verifier that
+cannot reach `network-api` to fetch a JWKS fails closed (rejects the
+message) rather than guessing — but `network-api` *could*, if it were
+compromised, serve a wrong (not forged — it holds no private keys) JWKS
+to misdirect verification toward an attacker's own public key paired
+with an attacker-controlled `kid`. A real federated deployment would
+have each organization publish its own JWKS from infrastructure it
+controls (e.g. its own domain), with `network-api`/the registry acting
+only as a directory pointing at it, not serving the key material
+directly. Not yet built; `network-api` is currently both the directory
+and the host.
 
-**Policy fail-closed.** `packages/policy_engine.evaluate_policy` turns
-every OPA failure mode (binary missing, timeout, non-zero exit,
+**Human approval is simulated via a labeled development identity
+adapter, not real OIDC/MFA.** `identity.dev_oidc` issues an ID-token-shaped
+JWT (`iss = "dev-oidc:<organization_id>"` — structurally unmistakable
+for a real provider) signed with the organization's own existing
+Ed25519 key, carrying `sub = approver_id` and `roles: ["approver"]`.
+`decide_approval` refuses every approval outright outside
+`environment in {"local", "staging", "test"}` — there is no real
+identity provider configured for production, and this is never silently
+bypassed. An approval is bound to one exact `(negotiation_id,
+content_hash)` pair; a revised proposal (different content_hash) always
+requires a new approval, and an approval can never be reused across
+hashes. There is still no human login, session, SSO or MFA behind any
+of this — that remains M6/M7 scope.
+
+**Policy fail-closed (unchanged from M5).** `packages/policy_engine.evaluate_policy`
+turns every OPA failure mode (binary missing, timeout, non-zero exit,
 unparseable or malformed output) into an explicit `allow=False`
 decision — there is no code path where a policy outage is silently
 treated as approval.
+
+**Idempotent crash/retry recovery (M5.1, `apps/worker`).** A buyer-side
+commit that crashes, times out, or returns an ambiguous
+`RECONCILIATION_REQUIRED` outcome is retried by a role-parameterized
+worker process, bounded by a durable per-row attempt counter, always
+reusing the same idempotency key and re-invoking the exact same
+idempotent entry point a live request uses. The actual duplicate-order
+guard remains `supplier-mcp`'s own database UNIQUE constraint on
+`idempotency_key`, regardless of how many times — or by which
+process — a commit is retried.
 
 10. Buyer and supplier each independently deny on their own policy,
     reaching no shared conclusion.
 11. A proposal with an outstanding human approval cannot reach
     `AUTHORIZED`; approving a different content_hash than the current
     proposal has no effect on it.
-12. Cross-organization/cross-agent credential spoofing on
-    `authorization_evidence` or `order_commit_request` is rejected
-    before the artifact's claimed sender is trusted at all.
+12. Cross-organization/cross-agent impersonation on any negotiation or
+    commitment artifact is rejected before the artifact's claimed
+    sender is trusted at all — proven both by a key that was never
+    registered for the claimed organization and by a real key signing
+    while claiming a different organization.
 13. A non-`execute_order`-scoped credential (including the read-only
     `use_supplier_tools` one) cannot invoke `execute_order` directly.
 14. A replayed `order_commit_request` with the same idempotency key
     never creates a second mock order — enforced by a database UNIQUE
     constraint in `supplier-mcp`, not just application logic.
+15. A literal resend of the exact same signed message (same `jti`) is
+    rejected as a replay even within the signature's validity window;
+    a legitimate retry (fresh signature, same artifact content) is not.
+16. A message signed with a revoked key is rejected regardless of its
+    stated expiry; a message signed with a newly rotated key is
+    accepted once published, and the prior key remains valid only until
+    explicitly revoked.
+17. A tampered artifact (any field changed after signing, including
+    price/quantity/recipient/agreement id) fails digest verification.
+18. A crashed/timed-out commit is recovered by the worker to a
+    `CONFIRMED` state without creating a duplicate order; a second
+    recovery cycle against an already-resolved order is a no-op.

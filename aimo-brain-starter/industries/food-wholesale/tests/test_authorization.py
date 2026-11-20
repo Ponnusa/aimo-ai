@@ -91,7 +91,6 @@ def test_build_authorization_evidence_is_schema_valid() -> None:
         deny_reason=None,
         policy_version="v1",
         policy_input_digest="sha256:digest",
-        credential="dummy-credential",
     )
     assert artifact["type"] == "authorization_evidence"
     assert artifact["payload"]["allow"] is True
@@ -110,7 +109,6 @@ def test_build_order_commit_request_is_schema_valid() -> None:
         agreement_id="txn_01",
         content_hash_value="sha256:abc",
         idempotency_key="idem_01",
-        credential="dummy-credential",
     )
     assert artifact["type"] == "order_commit_request"
     assert artifact["payload"]["idempotency_key"] == "idem_01"
@@ -130,7 +128,6 @@ def test_build_order_confirmation_is_schema_valid() -> None:
         idempotency_key="idem_01",
         status="CONFIRMED",
         external_order_id="mock_order_abc123",
-        credential="dummy-credential",
     )
     assert artifact["type"] == "order_confirmation"
     assert artifact["payload"]["status"] == "CONFIRMED"

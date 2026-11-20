@@ -24,8 +24,13 @@ from food_wholesale import (
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from buyer_agent import authorization, negotiation_store
-from buyer_agent.client import _send_negotiation_artifact, discover_supplier_agent_card
+from buyer_agent import authorization, message_auth, negotiation_store
+from buyer_agent.client import (
+    AgentUnavailableError,
+    TaskNotCompletedError,
+    _send_negotiation_artifact,
+    discover_supplier_agent_card,
+)
 from buyer_agent.models import BuyerOrderRecord
 from buyer_agent.settings import BuyerAgentSettings
 
@@ -93,21 +98,27 @@ async def run_authorization_and_commitment(
         deny_reason=own_evidence.deny_reason,
         policy_version=own_evidence.policy_version,
         policy_input_digest=own_evidence.policy_input_digest,
-        credential=settings.buyer_commit_service_credential,
     )
 
     agent_card = await discover_supplier_agent_card(settings.supplier_a2a_url)
-    counterparty_response = await _send_negotiation_artifact(
-        agent_card, own_evidence_artifact, buyer_agent_id=settings.buyer_agent_id
-    )
+    try:
+        counterparty_response, verified = await _send_negotiation_artifact(
+            agent_card,
+            own_evidence_artifact,
+            settings=settings,
+            session_factory=session_factory,
+            recipient_organization_id=negotiation.counterparty_organization_id,
+        )
+    except message_auth.MessageAuthenticationError as exc:
+        raise CommitmentError(f"Could not authenticate supplier's evidence: {exc}") from exc
     validate_against_schema("authorization_evidence", counterparty_response)
 
     await authorization.record_counterparty_evidence(
         session_factory,
-        settings=settings,
         negotiation_id=negotiation_id,
         content_hash=content_hash,
         artifact=counterparty_response,
+        verified=verified,
     )
 
     if counterparty_response["payload"]["deny_reason"] == authorization.APPROVAL_PENDING_REASON:
@@ -160,6 +171,11 @@ async def _commit(
 
     now = datetime.now(UTC).replace(tzinfo=None)
     if existing_order is None:
+        # First attempt: persist intent (state=COMMITTING) *before* any
+        # network call, in the same local transaction — a crash right
+        # after this write and before a response is always recoverable
+        # by retrying with this exact row and idempotency_key, never by
+        # assuming the commit did or did not happen.
         async with session_factory() as session:
             session.add(
                 BuyerOrderRecord(
@@ -172,6 +188,19 @@ async def _commit(
                     updated_at=now,
                 )
             )
+            await session.commit()
+    else:
+        # A retry (worker-driven recovery after a crash, timeout, or an
+        # ambiguous RECONCILIATION_REQUIRED outcome) — same idempotency
+        # key, a freshly re-signed order_commit_request (proofs expire
+        # and jti is never reused), bounded attempt count for the
+        # worker's own backoff/give-up policy.
+        async with session_factory() as session:
+            record = await session.get(BuyerOrderRecord, existing_order.id)
+            record.attempts += 1
+            record.state = "COMMITTING"
+            record.updated_at = now
+            await session.merge(record)
             await session.commit()
 
     commit_request = build_order_commit_request(
@@ -186,11 +215,25 @@ async def _commit(
         agreement_id=negotiation_id,
         content_hash_value=content_hash,
         idempotency_key=idempotency_key,
-        credential=settings.buyer_commit_service_credential,
     )
-    confirmation = await _send_negotiation_artifact(
-        agent_card, commit_request, buyer_agent_id=settings.buyer_agent_id
-    )
+    try:
+        confirmation, _verified = await _send_negotiation_artifact(
+            agent_card,
+            commit_request,
+            settings=settings,
+            session_factory=session_factory,
+            recipient_organization_id=negotiation.counterparty_organization_id,
+        )
+    except message_auth.MessageAuthenticationError as exc:
+        raise CommitmentError(f"Could not authenticate order_confirmation: {exc}") from exc
+    except (AgentUnavailableError, TaskNotCompletedError) as exc:
+        # Never assume a timeout/unreachable-agent means the order was
+        # not created — leave the row at COMMITTING (already written
+        # above) for the worker to retry with the same idempotency_key;
+        # the supplier's own UNIQUE constraint on it is what actually
+        # prevents a duplicate order, regardless of how many times this
+        # is retried.
+        raise CommitmentError(f"Commit request did not complete: {exc}") from exc
     validate_against_schema("order_confirmation", confirmation)
 
     await _finalize_order(

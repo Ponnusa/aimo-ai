@@ -1,15 +1,19 @@
-"""Buyer-side independent policy authorization and human approval (M5).
+"""Buyer-side independent policy authorization and human approval
+(M5, credential/evidence model replaced in M5.1 — docs/DECISIONS.md
+ADR-012).
 
 Owns ``buyer_approvals``/``buyer_authorization_evidence`` — this
 organization's own, independently-evaluated OPA decision and (if
 required) human approval for one exact ``content_hash``. Never reads or
-writes supplier-agent's database; the supplier's own evidence is only
-ever accepted here after cryptographic verification of its agent-scoped
-``commit`` credential (:func:`record_counterparty_evidence`) — the
-payload's ``organization_id``/``sender_agent_id`` fields alone are never
-sufficient (CLAUDE.md M5, closing the gap M4's ADR-010 left: payload-only
-sender/organization binding).
-"""
+writes supplier-agent's database. The supplier's own evidence is only
+ever accepted here as a :class:`message_integrity.VerifiedProof` the
+caller already obtained from ``buyer_agent.message_auth.
+verify_inbound_artifact`` — cryptographic signature verification,
+replay protection and registry/relationship checks happen *before*
+this module ever sees the artifact; this module's own job is only the
+negotiation-participant binding (does the verified sender actually
+match who this negotiation belongs to?) and the durable evidence
+bookkeeping."""
 
 from __future__ import annotations
 
@@ -19,6 +23,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from food_wholesale import agreement_terms_from_proposed_agreement, policy_bundle_dir, policy_query
+from identity.dev_oidc import DevOidcError, verify_dev_approval_token
+from message_integrity import VerifiedProof, private_key_from_pem
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -30,7 +36,6 @@ from buyer_agent.models import (
 )
 from buyer_agent.negotiation_store import NegotiationNotFoundError, get_negotiation
 from buyer_agent.settings import BuyerAgentSettings
-from identity import ServiceCredentialClaims, ServiceCredentialError, verify_service_credential
 
 ROLE = "buyer"
 #: A denied-for-approval-pending evidence is never persisted as the
@@ -45,9 +50,10 @@ class StaleEvidenceError(Exception):
 
 
 class UnverifiedCounterpartyError(Exception):
-    """Raised when the credential presented alongside counterparty
-    evidence does not cryptographically match the organization/agent
-    this negotiation actually belongs to."""
+    """Raised when an already-verified message proof's organization/
+    agent does not match this negotiation's actual recorded
+    counterparty — the cryptographic signature is valid, but it is not
+    valid *for this negotiation* (cross-tenant participant binding)."""
 
 
 class ApprovalNotFoundError(Exception):
@@ -329,20 +335,24 @@ async def decide_approval(
     settings: BuyerAgentSettings,
     approval_id: int,
     decision: str,
-    approver_credential: str,
+    approval_token: str,
 ) -> BuyerApprovalRecord:
-    """Only an authenticated, ``approve``-scoped credential holder may
+    """Only an authenticated dev-OIDC-shaped approval token (M5.1 —
+    :mod:`identity.dev_oidc`, refused outside local/staging) carrying
+    the ``approver`` role for this approval's own organization may
     approve or reject. ``decision`` is ``"APPROVED"`` or ``"REJECTED"``.
     Approving finalizes the "own" evidence row at this exact
     content_hash; any later proposal with a *different* content_hash
     needs its own, brand-new approval — this one can never be reused."""
+    private_key = private_key_from_pem(settings.buyer_signing_private_key_pem)
     try:
-        claims: ServiceCredentialClaims = verify_service_credential(
-            approver_credential,
-            signing_secret=settings.service_credential_signing_secret,
-            required_scope="approve",
+        claims = verify_dev_approval_token(
+            approval_token,
+            environment=settings.environment,
+            organization_id=settings.buyer_organization_id,
+            public_key=private_key.public_key(),
         )
-    except ServiceCredentialError as exc:
+    except DevOidcError as exc:
         raise UnauthorizedApproverError(str(exc)) from exc
 
     async with session_factory() as session:
@@ -351,7 +361,7 @@ async def decide_approval(
             raise ApprovalNotFoundError(approval_id)
         if claims.organization_id != record.organization_id:
             raise UnauthorizedApproverError(
-                "Approver credential is not scoped to this approval's organization."
+                "Approval token is not scoped to this approval's organization."
             )
         if record.status != "PENDING":
             raise ApprovalNotPendingError(
@@ -366,10 +376,16 @@ async def decide_approval(
         now = _now()
         record.status = decision
         record.approver_id = claims.approver_id
+        record.approver_issuer = claims.issuer
         record.decided_at = now
         audit_trail = json.loads(record.audit_trail_json)
         audit_trail.append(
-            {"event": decision.lower(), "approver_id": claims.approver_id, "at": now.isoformat()}
+            {
+                "event": decision.lower(),
+                "approver_id": claims.approver_id,
+                "approver_issuer": claims.issuer,
+                "at": now.isoformat(),
+            }
         )
         record.audit_trail_json = json.dumps(audit_trail)
         await session.merge(record)
@@ -403,40 +419,28 @@ async def get_own_evidence(
 async def record_counterparty_evidence(
     session_factory: async_sessionmaker,
     *,
-    settings: BuyerAgentSettings,
     negotiation_id: str,
     content_hash: str,
     artifact: dict[str, Any],
+    verified: VerifiedProof,
 ) -> BuyerAuthorizationEvidenceRecord:
-    """Verify the supplier's agent-scoped ``commit`` credential (carried
-    inside ``artifact["payload"]["credential"]`` — it must survive a
-    synchronous Task-artifact reply, which has no sender message
-    metadata of its own) and the artifact's own content_hash before
-    trusting it as the supplier's evidence. Never trusts
-    ``artifact["organization_id"]``/``artifact["sender_agent_id"]`` alone
-    (CLAUDE.md M5)."""
+    """``verified`` must already be the result of
+    ``buyer_agent.message_auth.verify_inbound_artifact`` — cryptographic
+    signature, replay and registry/relationship checks are *not*
+    repeated here. This function's own job is the negotiation-
+    participant binding: a validly signed message is only evidence
+    *for this negotiation* if its verified sender actually matches who
+    this negotiation's counterparty really is."""
     negotiation = await get_negotiation(session_factory, negotiation_id)
     if negotiation is None:
         raise NegotiationNotFoundError(negotiation_id)
 
-    bearer_credential = artifact["payload"].get("credential")
-    if bearer_credential is None:
-        raise UnverifiedCounterpartyError("No credential presented with evidence.")
-    try:
-        claims = verify_service_credential(
-            bearer_credential,
-            signing_secret=settings.service_credential_signing_secret,
-            required_scope="commit",
-        )
-    except ServiceCredentialError as exc:
-        raise UnverifiedCounterpartyError(str(exc)) from exc
-
     if (
-        claims.organization_id != negotiation.counterparty_organization_id
-        or claims.agent_id != negotiation.counterparty_agent_id
+        verified.organization_id != negotiation.counterparty_organization_id
+        or verified.agent_id != negotiation.counterparty_agent_id
     ):
         raise UnverifiedCounterpartyError(
-            "Credential does not match this negotiation's counterparty organization/agent."
+            "Verified sender does not match this negotiation's counterparty organization/agent."
         )
 
     payload = artifact["payload"]
@@ -467,8 +471,8 @@ async def record_counterparty_evidence(
             record = BuyerAuthorizationEvidenceRecord(
                 negotiation_id=negotiation_id, content_hash=content_hash, source="counterparty"
             )
-        record.organization_id = claims.organization_id
-        record.agent_id = claims.agent_id
+        record.organization_id = verified.organization_id
+        record.agent_id = verified.agent_id
         record.allow = payload["allow"]
         record.human_approval_required = payload["human_approval_required"]
         record.deny_reason = payload.get("deny_reason")

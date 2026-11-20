@@ -20,6 +20,7 @@ members = [
     "database",
     "identity",
     "mcp-integration",
+    "message-integrity",
     "network-api",
     "policy-engine",
     "registry-api",
@@ -316,6 +317,7 @@ dependencies = [
     { name = "httpx" },
     { name = "identity" },
     { name = "mcp-integration" },
+    { name = "message-integrity" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "trade-protocol" },
@@ -335,6 +337,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.2" },
     { name = "identity", editable = "packages/identity" },
     { name = "mcp-integration", editable = "packages/mcp-integration" },
+    { name = "message-integrity", editable = "packages/message-integrity" },
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "pydantic-settings", specifier = ">=2.4.0" },
     { name = "trade-protocol", editable = "packages/trade-protocol" },
@@ -976,11 +979,17 @@ name = "identity"
 version = "0.1.0"
 source = { editable = "packages/identity" }
 dependencies = [
+    { name = "cryptography" },
     { name = "pydantic" },
+    { name = "pyjwt", extra = ["crypto"] },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "pydantic", specifier = ">=2.9.0" }]
+requires-dist = [
+    { name = "cryptography", specifier = ">=43.0.0" },
+    { name = "pydantic", specifier = ">=2.9.0" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.9.0" },
+]
 
 [[package]]
 name = "idna"
@@ -1302,6 +1311,27 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.2" },
     { name = "identity", editable = "packages/identity" },
     { name = "mcp", specifier = "==1.30.0" },
+]
+
+[[package]]
+name = "message-integrity"
+version = "0.1.0"
+source = { editable = "packages/message-integrity" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "trade-protocol" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cryptography", specifier = ">=43.0.0" },
+    { name = "httpx", specifier = ">=0.27.2" },
+    { name = "pydantic", specifier = ">=2.9.0" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.9.0" },
+    { name = "trade-protocol", editable = "packages/trade-protocol" },
 ]
 
 [[package]]
@@ -2162,6 +2192,7 @@ dependencies = [
     { name = "httpx" },
     { name = "identity" },
     { name = "mcp-integration" },
+    { name = "message-integrity" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "trade-protocol" },
@@ -2181,6 +2212,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.2" },
     { name = "identity", editable = "packages/identity" },
     { name = "mcp-integration", editable = "packages/mcp-integration" },
+    { name = "message-integrity", editable = "packages/message-integrity" },
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "pydantic-settings", specifier = ">=2.4.0" },
     { name = "trade-protocol", editable = "packages/trade-protocol" },
@@ -2515,15 +2547,21 @@ version = "0.1.0"
 source = { editable = "apps/worker" }
 dependencies = [
     { name = "agent-runtime" },
+    { name = "buyer-agent" },
+    { name = "database" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "supplier-agent" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "agent-runtime", editable = "packages/agent-runtime" },
+    { name = "buyer-agent", editable = "apps/buyer-agent" },
+    { name = "database", editable = "packages/database" },
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "pydantic-settings", specifier = ">=2.4.0" },
+    { name = "supplier-agent", editable = "apps/supplier-agent" },
 ]
 
 [[package]]
