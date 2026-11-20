@@ -155,6 +155,8 @@ def _build_supplier_app(
     import supplier_agent.app as supplier_app_module
     import supplier_agent.settings as supplier_settings_module
     from supplier_agent.models import (
+        SupplierActivePolicyPointerRecord,
+        SupplierApprovalDecisionRecord,
         SupplierApprovalRecord,
         SupplierAuthorizationEvidenceRecord,
         SupplierNegotiationRecord,
@@ -193,6 +195,8 @@ def _build_supplier_app(
         SupplierAuthorizationEvidenceRecord,
         SupplierOrderRecord,
         SupplierSeenMessageProofRecord,
+        SupplierActivePolicyPointerRecord,
+        SupplierApprovalDecisionRecord,
     )
 
 
@@ -208,6 +212,8 @@ def _build_buyer_app(
     import buyer_agent.app as buyer_app_module
     import buyer_agent.settings as buyer_settings_module
     from buyer_agent.models import (
+        BuyerActivePolicyPointerRecord,
+        BuyerApprovalDecisionRecord,
         BuyerApprovalRecord,
         BuyerAuthorizationEvidenceRecord,
         BuyerNegotiationRecord,
@@ -240,6 +246,8 @@ def _build_buyer_app(
         BuyerAuthorizationEvidenceRecord,
         BuyerOrderRecord,
         BuyerSeenMessageProofRecord,
+        BuyerActivePolicyPointerRecord,
+        BuyerApprovalDecisionRecord,
     )
 
 
