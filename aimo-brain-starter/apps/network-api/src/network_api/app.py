@@ -23,6 +23,7 @@ from sqlalchemy import select
 from database import new_engine, new_session_factory
 from identity import issue_service_credential
 from network_api.models import (
+    OrganizationMemberRecord,
     OrganizationRecord,
     OrganizationSigningKeyRecord,
     TradingRelationshipRecord,
@@ -49,14 +50,26 @@ SUPPLIER_TOOLS_SCOPE = "use_supplier_tools"
 #: organization (an agent calling its own org's MCP server), not
 #: cross-organization.
 EXECUTE_ORDER_SCOPE = "execute_order"
+#: M6: the portal's own backend calls each organization's buyer-agent/
+#: supplier-agent management API with a credential scoped this way —
+#: intra-organization only (the portal always acts on behalf of the
+#: organization that is itself logged in), never crossing an
+#: organization boundary, so the shared-HMAC mechanism remains the
+#: right tool here exactly as it is for ``execute_order``.
+MANAGE_ORGANIZATION_SCOPE = "manage_organization"
 ALLOWED_SERVICE_CREDENTIAL_SCOPES = frozenset(
     {
         AGENT_MANAGEMENT_SCOPE,
         BUYER_TOOLS_SCOPE,
         SUPPLIER_TOOLS_SCOPE,
         EXECUTE_ORDER_SCOPE,
+        MANAGE_ORGANIZATION_SCOPE,
     }
 )
+
+#: M6 organization-membership roles. Not cumulative tiers — a member can
+#: hold more than one (one row per role; see ``OrganizationMemberRecord``).
+ORGANIZATION_MEMBER_ROLES = frozenset({"admin", "operator", "approver", "auditor"})
 
 
 class OrganizationOut(BaseModel):
@@ -73,6 +86,15 @@ class HealthOut(BaseModel):
 class ServiceCredentialRequest(BaseModel):
     ttl_seconds: int = 3600
     scope: str = AGENT_MANAGEMENT_SCOPE
+    #: M6: the only agent_id this endpoint will ever bind to a
+    #: credential. The portal sets it, after independently confirming
+    #: (against this service's own ``organization_members`` table) that
+    #: the signed-in human holds the ``admin`` role, so an agent's
+    #: management API can require this exact sentinel on
+    #: admin-only actions (policy activation) without reopening M5's
+    #: general-purpose agent_id-bound credential mechanism that M5.1
+    #: removed. Rejected for every other scope and every other value.
+    agent_id: str | None = None
 
 
 class ServiceCredentialOut(BaseModel):
@@ -94,6 +116,46 @@ class SigningKeyOut(BaseModel):
     status: str
     not_before: str
     not_after: str
+
+
+class MemberIn(BaseModel):
+    oidc_subject: str
+    email: str
+    display_name: str
+    role: str
+
+
+class MemberOut(BaseModel):
+    id: int
+    organization_id: str
+    oidc_subject: str
+    email: str
+    display_name: str
+    role: str
+    status: str
+
+
+class MemberLookupOut(BaseModel):
+    organization_id: str
+    oidc_subject: str
+    role: str
+    active: bool
+
+
+class OidcMappingIn(BaseModel):
+    oidc_issuer: str
+    oidc_tenant_id: str
+
+
+class OidcMappingOut(BaseModel):
+    organization_id: str
+    oidc_issuer: str
+    oidc_tenant_id: str
+
+
+class OrganizationByTenantOut(BaseModel):
+    organization_id: str
+    display_name: str
 
 
 class RelationshipIn(BaseModel):
@@ -178,6 +240,16 @@ def create_app() -> FastAPI:
                     f"Allowed: {sorted(ALLOWED_SERVICE_CREDENTIAL_SCOPES)}."
                 ),
             )
+        if body.agent_id is not None and (
+            body.scope != MANAGE_ORGANIZATION_SCOPE or body.agent_id != "portal-admin-action"
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "agent_id may only be 'portal-admin-action', and only for "
+                    "'manage_organization'."
+                ),
+            )
         async with session_factory() as session:
             org = await session.get(OrganizationRecord, organization_id)
             if org is None:
@@ -190,6 +262,7 @@ def create_app() -> FastAPI:
             scope=body.scope,
             signing_secret=settings.service_credential_signing_secret,
             ttl_seconds=body.ttl_seconds,
+            agent_id=body.agent_id,
         )
         return ServiceCredentialOut(
             token=token,
@@ -436,6 +509,253 @@ def create_app() -> FastAPI:
                 .all()
             )
             return {"keys": [json.loads(row.public_key_jwk_json) for row in rows]}
+
+    # --- Organization membership and roles (M6) -------------------------
+
+    @app.post("/organizations/{organization_id}/members", response_model=MemberOut)
+    async def add_member(
+        organization_id: str,
+        body: MemberIn,
+        x_admin_key: str | None = Header(default=None),
+    ) -> MemberOut:
+        """Grant one role to one human for this organization. Protected
+        by the same admin key as every other organization-management
+        action in this reference deployment; the portal forwards this
+        call only after independently confirming (via its own verified
+        session) that the requester already holds the ``admin`` role for
+        this organization — see docs/ARCHITECTURE.md's M6 section."""
+        _require_admin(x_admin_key, expected=settings.network_admin_api_key)
+        if body.role not in ORGANIZATION_MEMBER_ROLES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown role {body.role!r}. Allowed: {sorted(ORGANIZATION_MEMBER_ROLES)}.",
+            )
+        async with session_factory() as session:
+            if await session.get(OrganizationRecord, organization_id) is None:
+                raise HTTPException(
+                    status_code=404, detail=f"Organization {organization_id!r} does not exist."
+                )
+            existing = (
+                await session.execute(
+                    select(OrganizationMemberRecord).where(
+                        OrganizationMemberRecord.organization_id == organization_id,
+                        OrganizationMemberRecord.oidc_subject == body.oidc_subject,
+                        OrganizationMemberRecord.role == body.role,
+                    )
+                )
+            ).scalar_one_or_none()
+            now = datetime.now(UTC).replace(tzinfo=None)
+            if existing is not None:
+                existing.status = "active"
+                existing.revoked_at = None
+                existing.email = body.email
+                existing.display_name = body.display_name
+                await session.commit()
+                record = existing
+            else:
+                record = OrganizationMemberRecord(
+                    organization_id=organization_id,
+                    oidc_subject=body.oidc_subject,
+                    email=body.email,
+                    display_name=body.display_name,
+                    role=body.role,
+                    status="active",
+                    created_at=now,
+                    revoked_at=None,
+                )
+                session.add(record)
+                await session.commit()
+            return MemberOut(
+                id=record.id,
+                organization_id=record.organization_id,
+                oidc_subject=record.oidc_subject,
+                email=record.email,
+                display_name=record.display_name,
+                role=record.role,
+                status=record.status,
+            )
+
+    @app.post(
+        "/organizations/{organization_id}/members/{member_id}/revoke", response_model=MemberOut
+    )
+    async def revoke_member(
+        organization_id: str, member_id: int, x_admin_key: str | None = Header(default=None)
+    ) -> MemberOut:
+        _require_admin(x_admin_key, expected=settings.network_admin_api_key)
+        async with session_factory() as session:
+            record = await session.get(OrganizationMemberRecord, member_id)
+            if record is None or record.organization_id != organization_id:
+                raise HTTPException(status_code=404, detail="Member not found.")
+            record.status = "revoked"
+            record.revoked_at = datetime.now(UTC).replace(tzinfo=None)
+            await session.commit()
+            return MemberOut(
+                id=record.id,
+                organization_id=record.organization_id,
+                oidc_subject=record.oidc_subject,
+                email=record.email,
+                display_name=record.display_name,
+                role=record.role,
+                status=record.status,
+            )
+
+    @app.get("/organizations/{organization_id}/members", response_model=list[MemberOut])
+    async def list_members(
+        organization_id: str, x_admin_key: str | None = Header(default=None)
+    ) -> list[MemberOut]:
+        _require_admin(x_admin_key, expected=settings.network_admin_api_key)
+        async with session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(OrganizationMemberRecord).where(
+                            OrganizationMemberRecord.organization_id == organization_id
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [
+                MemberOut(
+                    id=row.id,
+                    organization_id=row.organization_id,
+                    oidc_subject=row.oidc_subject,
+                    email=row.email,
+                    display_name=row.display_name,
+                    role=row.role,
+                    status=row.status,
+                )
+                for row in rows
+            ]
+
+    @app.get("/members/lookup", response_model=MemberLookupOut)
+    async def lookup_member(
+        organization_id: str,
+        oidc_subject: str,
+        role: str,
+        x_internal_service_key: str | None = Header(default=None),
+    ) -> MemberLookupOut:
+        """Internal, service-to-service only: used both by the portal at
+        login (resolving a verified identity's role for an organization)
+        and by buyer-agent/supplier-agent to independently revalidate a
+        portal-issued approval assertion's claimed approver before
+        deciding an approval (docs/ARCHITECTURE.md's M6 section) — never
+        trusting the assertion's own claim of an active role alone."""
+        _require_internal_service(
+            x_internal_service_key, expected=settings.network_internal_service_key
+        )
+        async with session_factory() as session:
+            record = (
+                await session.execute(
+                    select(OrganizationMemberRecord).where(
+                        OrganizationMemberRecord.organization_id == organization_id,
+                        OrganizationMemberRecord.oidc_subject == oidc_subject,
+                        OrganizationMemberRecord.role == role,
+                    )
+                )
+            ).scalar_one_or_none()
+            active = record is not None and record.status == "active"
+            return MemberLookupOut(
+                organization_id=organization_id,
+                oidc_subject=oidc_subject,
+                role=role,
+                active=active,
+            )
+
+    # --- OIDC tenant mapping (M6) ----------------------------------------
+
+    @app.post("/organizations/{organization_id}/oidc-mapping", response_model=OidcMappingOut)
+    async def set_oidc_mapping(
+        organization_id: str,
+        body: OidcMappingIn,
+        x_admin_key: str | None = Header(default=None),
+    ) -> OidcMappingOut:
+        """Bind this organization to exactly one identity-provider
+        tenant. The portal resolves a logged-in human's organization
+        from this mapping (issuer + tenant id from the validated ID
+        token), never from an email domain."""
+        _require_admin(x_admin_key, expected=settings.network_admin_api_key)
+        async with session_factory() as session:
+            org = await session.get(OrganizationRecord, organization_id)
+            if org is None:
+                raise HTTPException(
+                    status_code=404, detail=f"Organization {organization_id!r} does not exist."
+                )
+            org.oidc_issuer = body.oidc_issuer
+            org.oidc_tenant_id = body.oidc_tenant_id
+            await session.commit()
+            return OidcMappingOut(
+                organization_id=organization_id,
+                oidc_issuer=body.oidc_issuer,
+                oidc_tenant_id=body.oidc_tenant_id,
+            )
+
+    @app.get("/organizations/by-oidc-tenant", response_model=OrganizationByTenantOut)
+    async def get_organization_by_oidc_tenant(
+        oidc_issuer: str,
+        oidc_tenant_id: str,
+        x_internal_service_key: str | None = Header(default=None),
+    ) -> OrganizationByTenantOut:
+        _require_internal_service(
+            x_internal_service_key, expected=settings.network_internal_service_key
+        )
+        async with session_factory() as session:
+            org = (
+                await session.execute(
+                    select(OrganizationRecord).where(
+                        OrganizationRecord.oidc_issuer == oidc_issuer,
+                        OrganizationRecord.oidc_tenant_id == oidc_tenant_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if org is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="No organization is mapped to this identity-provider tenant.",
+                )
+            return OrganizationByTenantOut(
+                organization_id=org.organization_id, display_name=org.display_name
+            )
+
+    # --- Organization-scoped relationship listing (M6) -------------------
+
+    @app.get("/organizations/{organization_id}/relationships", response_model=list[RelationshipOut])
+    async def list_relationships_for_organization(
+        organization_id: str, x_internal_service_key: str | None = Header(default=None)
+    ) -> list[RelationshipOut]:
+        """Every relationship where ``organization_id`` is either side —
+        for the portal's own trading-relationships page. Internal-
+        service-key gated like the existing discovery lookup; the portal
+        is a trusted backend caller, same as registry-api."""
+        _require_internal_service(
+            x_internal_service_key, expected=settings.network_internal_service_key
+        )
+        async with session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(TradingRelationshipRecord).where(
+                            (TradingRelationshipRecord.buyer_organization_id == organization_id)
+                            | (
+                                TradingRelationshipRecord.supplier_organization_id
+                                == organization_id
+                            )
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return [
+                RelationshipOut(
+                    id=row.id,
+                    buyer_organization_id=row.buyer_organization_id,
+                    supplier_organization_id=row.supplier_organization_id,
+                    status=row.status,
+                )
+                for row in rows
+            ]
 
     return app
 

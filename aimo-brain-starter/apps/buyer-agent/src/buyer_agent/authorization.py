@@ -20,16 +20,28 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from food_wholesale import agreement_terms_from_proposed_agreement, policy_bundle_dir, policy_query
 from identity.dev_oidc import DevOidcError, verify_dev_approval_token
+from identity.portal_approval import (
+    PortalApprovalError,
+    peek_issuer,
+    peek_kid,
+    verify_portal_approval_token,
+)
 from message_integrity import VerifiedProof, private_key_from_pem
+from message_integrity.jwks import HttpJwksResolver, KeyNotFoundError
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from authorization import evaluate_binding_action
+from buyer_agent.member_client import MemberLookupError, is_active_member_with_role
 from buyer_agent.models import (
+    BuyerActivePolicyPointerRecord,
+    BuyerApprovalDecisionRecord,
     BuyerApprovalRecord,
     BuyerAuthorizationEvidenceRecord,
     BuyerProposalRecord,
@@ -85,6 +97,59 @@ class AuthorizationOutcome:
     content_hash: str
     policy_version: str
     policy_input_digest: str
+
+
+async def resolve_active_policy_version(
+    session_factory: async_sessionmaker, *, settings: BuyerAgentSettings
+) -> str:
+    """M6: a portal-activated pointer (``buyer_management_api.
+    activate_policy``) overrides ``settings.buyer_policy_version`` when
+    one has been set for this organization. Bundle contents on disk are
+    never edited through the portal — only this pointer is."""
+    async with session_factory() as session:
+        pointer = await session.get(BuyerActivePolicyPointerRecord, settings.buyer_organization_id)
+    return pointer.policy_version if pointer is not None else settings.buyer_policy_version
+
+
+async def _required_approver_count(
+    session_factory: async_sessionmaker,
+    *,
+    settings: BuyerAgentSettings,
+    negotiation_id: str,
+    content_hash: str,
+) -> int:
+    """M6 dual control: when an organization configures
+    ``buyer_require_second_approver_above_amount`` and this agreement's
+    total exceeds it, a single approver's decision is no longer
+    sufficient. Defaults to 1 (today's M5 behavior) whenever no
+    threshold is configured, the proposal can't be found, or the total
+    can't be parsed — never silently requires *more* scrutiny than
+    configured, but also never silently requires less than 1."""
+    threshold_raw = settings.buyer_require_second_approver_above_amount
+    if not threshold_raw:
+        return 1
+    try:
+        threshold = Decimal(threshold_raw)
+    except InvalidOperation:
+        return 1
+
+    async with session_factory() as session:
+        result = await session.execute(
+            select(BuyerProposalRecord).where(
+                BuyerProposalRecord.negotiation_id == negotiation_id,
+                BuyerProposalRecord.content_hash == content_hash,
+                BuyerProposalRecord.artifact_type == "proposed_agreement",
+            )
+        )
+        proposal = result.scalar_one_or_none()
+    if proposal is None:
+        return 1
+    try:
+        terms = agreement_terms_from_proposed_agreement(json.loads(proposal.payload_json))
+        total_amount = Decimal(terms["total_amount"])
+    except (KeyError, ValueError, InvalidOperation, TypeError):
+        return 1
+    return 2 if total_amount > threshold else 1
 
 
 async def evaluate_and_request_approval(
@@ -153,6 +218,7 @@ async def evaluate_and_request_approval(
         )
 
     terms = agreement_terms_from_proposed_agreement(artifact)
+    active_policy_version = await resolve_active_policy_version(session_factory, settings=settings)
     decision = evaluate_binding_action(
         action="authorize_agreement",
         organization_id=settings.buyer_organization_id,
@@ -160,9 +226,9 @@ async def evaluate_and_request_approval(
         agreement_id=negotiation_id,
         content_hash=content_hash_value,
         terms=terms,
-        bundle_dir=policy_bundle_dir(ROLE, settings.buyer_policy_version),
-        query=policy_query(ROLE, settings.buyer_policy_version),
-        policy_version=settings.buyer_policy_version,
+        bundle_dir=policy_bundle_dir(ROLE, active_policy_version),
+        query=policy_query(ROLE, active_policy_version),
+        policy_version=active_policy_version,
         opa_binary=settings.opa_binary,
     )
 
@@ -337,13 +403,61 @@ async def decide_approval(
     decision: str,
     approval_token: str,
 ) -> BuyerApprovalRecord:
-    """Only an authenticated dev-OIDC-shaped approval token (M5.1 —
-    :mod:`identity.dev_oidc`, refused outside local/staging) carrying
-    the ``approver`` role for this approval's own organization may
-    approve or reject. ``decision`` is ``"APPROVED"`` or ``"REJECTED"``.
-    Approving finalizes the "own" evidence row at this exact
-    content_hash; any later proposal with a *different* content_hash
-    needs its own, brand-new approval — this one can never be reused."""
+    """Decide one pending approval. ``decision`` is ``"APPROVED"`` or
+    ``"REJECTED"``. ``approval_token`` must be either a dev-OIDC-shaped
+    token (:mod:`identity.dev_oidc`, refused outside local/staging) or a
+    portal approval assertion (:mod:`identity.portal_approval`, M6,
+    allowed in every environment but independently revalidated against
+    network-api's own membership records before being honored) — which
+    one is dispatched on the token's own ``iss`` claim. Approving
+    finalizes the "own" evidence row at this exact content_hash once
+    enough distinct approvers have decided (see
+    :func:`_required_approver_count`); any later proposal with a
+    *different* content_hash needs its own, brand-new approval."""
+    if decision not in ("APPROVED", "REJECTED"):
+        raise ValueError(f"decision must be 'APPROVED' or 'REJECTED', got {decision!r}")
+
+    issuer = peek_issuer(approval_token)
+    if issuer is not None and issuer.startswith("dev-oidc:"):
+        approver_id, approver_issuer = await _verify_dev_oidc_decider(
+            approval_token, settings=settings
+        )
+        record = await _apply_single_decision(
+            session_factory,
+            approval_id=approval_id,
+            decision=decision,
+            approver_id=approver_id,
+            approver_issuer=approver_issuer,
+        )
+    else:
+        record = await _decide_with_portal_assertion(
+            session_factory,
+            settings=settings,
+            approval_id=approval_id,
+            decision=decision,
+            approval_token=approval_token,
+        )
+
+    if record.status == "APPROVED":
+        policy_decision = json.loads(record.policy_decision_json)
+        await _finalize_own_evidence(
+            session_factory,
+            negotiation_id=record.negotiation_id,
+            content_hash=record.content_hash,
+            organization_id=record.organization_id,
+            agent_id=settings.buyer_agent_id,
+            allow=True,
+            human_approval_required=True,
+            deny_reason=None,
+            policy_version=record.policy_version,
+            policy_input_digest=policy_decision["input_digest"],
+        )
+    return record
+
+
+async def _verify_dev_oidc_decider(
+    approval_token: str, *, settings: BuyerAgentSettings
+) -> tuple[str, str]:
     private_key = private_key_from_pem(settings.buyer_signing_private_key_pem)
     try:
         claims = verify_dev_approval_token(
@@ -354,12 +468,96 @@ async def decide_approval(
         )
     except DevOidcError as exc:
         raise UnauthorizedApproverError(str(exc)) from exc
+    return claims.approver_id, claims.issuer
 
+
+async def _decide_with_portal_assertion(
+    session_factory: async_sessionmaker,
+    *,
+    settings: BuyerAgentSettings,
+    approval_id: int,
+    decision: str,
+    approval_token: str,
+) -> BuyerApprovalRecord:
     async with session_factory() as session:
         record = await session.get(BuyerApprovalRecord, approval_id)
         if record is None:
             raise ApprovalNotFoundError(approval_id)
-        if claims.organization_id != record.organization_id:
+        negotiation_id = record.negotiation_id
+        content_hash = record.content_hash
+        organization_id = record.organization_id
+
+    kid = peek_kid(approval_token)
+    if kid is None:
+        raise UnauthorizedApproverError("Portal approval assertion has no key id.")
+    resolver = HttpJwksResolver(network_api_url=settings.network_api_url)
+    try:
+        public_key = await resolver.get_key(
+            organization_id=settings.portal_organization_id, kid=kid
+        )
+    except KeyNotFoundError as exc:
+        raise UnauthorizedApproverError(f"Unknown portal signing key: {exc}") from exc
+
+    try:
+        claims = verify_portal_approval_token(
+            approval_token,
+            public_key=public_key,
+            organization_id=organization_id,
+            negotiation_id=negotiation_id,
+            content_hash=content_hash,
+        )
+    except PortalApprovalError as exc:
+        raise UnauthorizedApproverError(str(exc)) from exc
+
+    try:
+        still_active = await is_active_member_with_role(
+            network_api_url=settings.network_api_url,
+            internal_service_key=settings.network_internal_service_key,
+            organization_id=organization_id,
+            oidc_subject=claims.approver_subject,
+            role="approver",
+        )
+    except MemberLookupError as exc:
+        raise UnauthorizedApproverError(str(exc)) from exc
+    if not still_active:
+        raise UnauthorizedApproverError(
+            f"{claims.approver_subject!r} does not currently hold an active 'approver' role "
+            f"for organization {organization_id!r}."
+        )
+
+    required_count = await _required_approver_count(
+        session_factory,
+        settings=settings,
+        negotiation_id=negotiation_id,
+        content_hash=content_hash,
+    )
+    return await _apply_decision_with_dual_control(
+        session_factory,
+        approval_id=approval_id,
+        decision=decision,
+        approver_id=claims.approver_subject,
+        approver_issuer=claims.issuer,
+        required_count=required_count,
+    )
+
+
+async def _apply_single_decision(
+    session_factory: async_sessionmaker,
+    *,
+    approval_id: int,
+    decision: str,
+    approver_id: str,
+    approver_issuer: str,
+) -> BuyerApprovalRecord:
+    """The original M5/M5.1 single-decider path: one decision
+    immediately finalizes the approval. Used for dev-OIDC tokens, which
+    never carry a dual-control requirement."""
+    async with session_factory() as session:
+        record = await session.get(BuyerApprovalRecord, approval_id)
+        if record is None:
+            raise ApprovalNotFoundError(approval_id)
+        expected_dev_issuer = f"dev-oidc:{record.organization_id}"
+        if approver_issuer.startswith("dev-oidc:") and approver_issuer != expected_dev_issuer:
             raise UnauthorizedApproverError(
                 "Approval token is not scoped to this approval's organization."
             )
@@ -375,37 +573,119 @@ async def decide_approval(
 
         now = _now()
         record.status = decision
-        record.approver_id = claims.approver_id
-        record.approver_issuer = claims.issuer
+        record.approver_id = approver_id
+        record.approver_issuer = approver_issuer
         record.decided_at = now
         audit_trail = json.loads(record.audit_trail_json)
         audit_trail.append(
             {
                 "event": decision.lower(),
-                "approver_id": claims.approver_id,
-                "approver_issuer": claims.issuer,
+                "approver_id": approver_id,
+                "approver_issuer": approver_issuer,
                 "at": now.isoformat(),
             }
         )
         record.audit_trail_json = json.dumps(audit_trail)
         await session.merge(record)
         await session.commit()
+        return record
 
-    if decision == "APPROVED":
-        policy_decision = json.loads(record.policy_decision_json)
-        await _finalize_own_evidence(
-            session_factory,
-            negotiation_id=record.negotiation_id,
-            content_hash=record.content_hash,
-            organization_id=record.organization_id,
-            agent_id=settings.buyer_agent_id,
-            allow=True,
-            human_approval_required=True,
-            deny_reason=None,
-            policy_version=record.policy_version,
-            policy_input_digest=policy_decision["input_digest"],
+
+async def _apply_decision_with_dual_control(
+    session_factory: async_sessionmaker,
+    *,
+    approval_id: int,
+    decision: str,
+    approver_id: str,
+    approver_issuer: str,
+    required_count: int,
+) -> BuyerApprovalRecord:
+    """M6: a rejection from any one authorized approver rejects
+    immediately — consensus is never required to say no. An approval
+    needs ``required_count`` distinct approvers (default 1, meaning
+    identical behavior to M5/M5.1) before it leaves ``PENDING``. The
+    same ``approver_id`` deciding this approval twice is rejected by the
+    table's own unique constraint — the literal single-approver self-
+    approval guard."""
+    async with session_factory() as session:
+        record = await session.get(BuyerApprovalRecord, approval_id)
+        if record is None:
+            raise ApprovalNotFoundError(approval_id)
+        if record.status != "PENDING":
+            raise ApprovalNotPendingError(
+                f"Approval {approval_id} is {record.status}, not PENDING."
+            )
+        if _now() > record.expires_at:
+            record.status = "EXPIRED"
+            await session.merge(record)
+            await session.commit()
+            raise ApprovalNotPendingError(f"Approval {approval_id} has expired.")
+
+        now = _now()
+        session.add(
+            BuyerApprovalDecisionRecord(
+                approval_id=approval_id,
+                approver_id=approver_id,
+                approver_issuer=approver_issuer,
+                decision=decision,
+                decided_at=now,
+            )
         )
-    return record
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            raise UnauthorizedApproverError(
+                f"{approver_id!r} has already decided approval {approval_id}."
+            ) from exc
+
+        audit_trail = json.loads(record.audit_trail_json)
+        audit_trail.append(
+            {
+                "event": decision.lower(),
+                "approver_id": approver_id,
+                "approver_issuer": approver_issuer,
+                "at": now.isoformat(),
+            }
+        )
+
+        if decision == "REJECTED":
+            record.status = "REJECTED"
+            record.approver_id = approver_id
+            record.approver_issuer = approver_issuer
+            record.decided_at = now
+        else:
+            approved_count = (
+                (
+                    await session.execute(
+                        select(BuyerApprovalDecisionRecord).where(
+                            BuyerApprovalDecisionRecord.approval_id == approval_id,
+                            BuyerApprovalDecisionRecord.decision == "APPROVED",
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if len(approved_count) >= required_count:
+                record.status = "APPROVED"
+                record.approver_id = approver_id
+                record.approver_issuer = approver_issuer
+                record.decided_at = now
+            else:
+                audit_trail.append(
+                    {
+                        "event": "partial_approval",
+                        "approved_so_far": len(approved_count),
+                        "required": required_count,
+                        "at": now.isoformat(),
+                    }
+                )
+
+        record.audit_trail_json = json.dumps(audit_trail)
+        await session.merge(record)
+        await session.commit()
+        return record
 
 
 async def get_own_evidence(

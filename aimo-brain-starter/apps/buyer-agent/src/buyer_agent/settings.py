@@ -93,6 +93,37 @@ class BuyerAgentSettings(ServiceSettings):
         validation_alias="NETWORK_API_URL",
     )
 
+    # M6: the portal's management API calls this agent with a
+    # "manage_organization"-scoped service credential, minted by
+    # network-api with the same shared HMAC secret already used for
+    # every other intra-organization scope (use_buyer_tools,
+    # execute_order, ...) — never a cross-organization trust root.
+    service_credential_signing_secret: str = Field(
+        default="dev-only-signing-secret-change-me",
+        validation_alias="SERVICE_CREDENTIAL_SIGNING_SECRET",
+    )
+    # Needed to independently revalidate a portal approval assertion's
+    # claimed approver against network-api's own membership records
+    # before honoring a decision (docs/SECURITY.md's M6 section) — this
+    # agent never trusts the assertion's role claim alone.
+    network_internal_service_key: str = Field(
+        default="dev-only-internal-key-change-me",
+        validation_alias="NETWORK_INTERNAL_SERVICE_KEY",
+    )
+    # The non-trading pseudo-organization whose published JWKS holds the
+    # portal's own public signing key (see network_api.seed).
+    portal_organization_id: str = Field(
+        default="org_aimo_portal",
+        validation_alias="PORTAL_ORGANIZATION_ID",
+    )
+    # Optional dual-control threshold (M6): when set and an agreement's
+    # total_amount exceeds it, a single approver's decision is no longer
+    # sufficient — see buyer_agent.authorization._required_approver_count.
+    buyer_require_second_approver_above_amount: str | None = Field(
+        default=None,
+        validation_alias="BUYER_REQUIRE_SECOND_APPROVER_ABOVE_AMOUNT",
+    )
+
 
 @lru_cache
 def get_settings() -> BuyerAgentSettings:

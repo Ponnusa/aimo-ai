@@ -63,10 +63,42 @@ time: a role-parameterized (`WORKER_ROLE=buyer|supplier`) process that
 retries a crashed/ambiguous buyer-side commit by re-invoking the same
 idempotent entry point a live request already uses.
 
+As of M6 (see `docs/DECISIONS.md` ADR-013), `apps/portal` is a real
+Next.js backend-for-frontend, not a placeholder shell: it authenticates
+humans over standard OIDC (Entra ID-compatible, with a clearly-labeled,
+environment-gated development login adapter mirroring `identity.dev_oidc`),
+resolves organization membership and role (`admin`/`operator`/`approver`/
+`auditor`) fresh from network-api's new `organization_members` table on
+every privileged request — never cached on the session — and never holds
+a long-lived credential for another service, minting a short-lived
+`manage_organization`-scoped one per call instead. Its one new
+cryptographic decision reuses M5.1's own machinery rather than adding a
+second mechanism: the portal holds its own Ed25519 keypair, published
+through network-api's existing JWKS endpoints against a non-trading
+pseudo-organization (`org_aimo_portal`), and signs a short-lived,
+negotiation/content_hash-bound "portal approval assertion"
+(`identity.portal_approval`) after independently verifying a real OIDC
+session — the deciding agent (`buyer_agent`/`supplier_agent`'s new
+`/management` API, `authorization.decide_approval`) verifies that
+assertion's signature *and* re-checks the claimed approver's role against
+network-api itself before honoring any decision, so a revoked role takes
+effect immediately, not on the portal's own say-so. An optional,
+per-organization dual-control threshold requires a second, distinct
+approver above a configured amount; policy bundles remain filesystem-
+immutable, with only a pointer to which on-disk version is active made
+portal-controlled and audited. Agent registration/lifecycle and trading
+relationships reuse M2's existing registry-api/network-api endpoints
+unchanged — M6 only added what those services didn't already expose
+(membership, OIDC-tenant mapping, an org-scoped relationship listing, and
+each agent's own read/decide management surface).
+
 ```mermaid
 flowchart TB
   P[Next.js Management Portal] --> N[Network API]
   P --> G[Registry API]
+  P -->|manage_organization-scoped credential| B
+  P -->|manage_organization-scoped credential| S
+  P --> PD[(Portal sessions/audit DB)]
   N --> R[(Network Neon DB)]
   G --> RG[(Registry Neon DB)]
   G -. relationship lookup, HTTP only .-> N
@@ -90,15 +122,15 @@ In a managed environment, separate Neon databases or rigorously isolated schemas
 
 ## Deployables
 
-- `apps/network-api`: organization identities, organization-level trading relationships, short-lived organization-scoped service-credential issuance (intra-organization scopes only as of M5.1), public protocol schemas, and — as of M5.1 — each organization's public signing-key directory (`organization_signing_keys`, `GET /organizations/{id}/jwks.json`). Never receives or stores a private key.
+- `apps/network-api`: organization identities, organization-level trading relationships, short-lived organization-scoped service-credential issuance (intra-organization scopes only as of M5.1), public protocol schemas, each organization's public signing-key directory (`organization_signing_keys`, `GET /organizations/{id}/jwks.json`, M5.1 — never receives or stores a private key), and — as of M6 — organization membership/roles (`organization_members`, admin/operator/approver/auditor) and OIDC-tenant-to-organization mapping, both consulted by the portal and independently revalidated by each agent.
 - `apps/registry-api`: agent registration, Agent Card fetch/validation (SSRF-safe), capability indexing, endpoint-ownership verification, agent lifecycle (pending/active/suspended/revoked), capability-indexed discovery (gated by a trading relationship looked up from network-api), registry audit trail. Never proxies an A2A conversation — discovery returns the real A2A endpoint URL, and agents talk to each other directly.
-- `apps/buyer-agent`: independent A2A endpoint, LangGraph workflow, buyer MCP client (calls `apps/buyer-mcp` only), nonbinding RFQ/counteroffer negotiation (M4, own negotiation/proposal tables), independent OPA policy evaluation, durable human approval and authorization-evidence exchange (M5, own `buyer_approvals`/`buyer_authorization_evidence`/`buyer_orders` tables), and private state.
-- `apps/supplier-agent`: independent A2A endpoint, LangGraph workflow, supplier MCP client (calls `apps/supplier-mcp` only), nonbinding quote/counteroffer negotiation (M4, own negotiation/proposal tables plus an inbound-artifact replay-dedup cache), independent OPA policy evaluation, durable human approval and authorization-evidence exchange, and commitment handling that calls its own `supplier-mcp`'s execution tool (M5, own `supplier_approvals`/`supplier_authorization_evidence`/`supplier_orders` tables), and private state.
+- `apps/buyer-agent`: independent A2A endpoint, LangGraph workflow, buyer MCP client (calls `apps/buyer-mcp` only), nonbinding RFQ/counteroffer negotiation (M4, own negotiation/proposal tables), independent OPA policy evaluation, durable human approval and authorization-evidence exchange (M5, own `buyer_approvals`/`buyer_authorization_evidence`/`buyer_orders` tables), private state, and — as of M6 — a second, additive `/management` API (own router on the same FastAPI app, `manage_organization`-scoped) giving the portal read access to negotiations/approvals/evidence/orders and a `decide_approval` surface that accepts a portal approval assertion alongside the existing dev-OIDC token, plus a portal-activatable policy-version pointer (`buyer_active_policy_pointer`) and dual-control decision rows (`buyer_approval_decisions`).
+- `apps/supplier-agent`: independent A2A endpoint, LangGraph workflow, supplier MCP client (calls `apps/supplier-mcp` only), nonbinding quote/counteroffer negotiation (M4, own negotiation/proposal tables plus an inbound-artifact replay-dedup cache), independent OPA policy evaluation, durable human approval and authorization-evidence exchange, and commitment handling that calls its own `supplier-mcp`'s execution tool (M5, own `supplier_approvals`/`supplier_authorization_evidence`/`supplier_orders` tables), private state, and the same M6 `/management` API addition as buyer-agent.
 - `apps/buyer-mcp`: buyer organization's own MCP tool server (purchase requirements, budget, approved suppliers, purchase approval — a mock decision, not OPA). Independently deployable; own database (tool-invocation audit log); scoped-credential-authenticated; never serves any other organization.
 - `apps/supplier-mcp`: supplier organization's own MCP tool server (catalogue search, inventory, customer price, delivery options — read-only, `use_supplier_tools` scope). As of M5, also exposes `execute_order`/`get_order_status` (the approved mock order adapter), gated by a separate, narrower `execute_order` scope and backed by its own `supplier_mcp_orders` table with a UNIQUE `idempotency_key` constraint — the actual idempotency authority for commits, independent of supplier-agent's own audit copy. Independently deployable; own database; scoped-credential-authenticated; never serves any other organization.
 - `apps/worker`: retry, timeout, inbox/outbox dispatch and reconciliation. Scaffolded in M0–M4; real as of M5.1 — role-parameterized (`WORKER_ROLE=buyer|supplier`, one deployment per organization, each against only its own agent's database), it retries a buyer-side commit stuck in `COMMITTING`/`RECONCILIATION_REQUIRED` past a backoff, bounded by a durable per-row attempt count, by re-invoking `buyer_agent.commitment.run_authorization_and_commitment` — the same idempotent entry point a live request uses, never a separate "worker version" of the logic. The supplier role is currently a documented no-op (supplier-side commit handling is synchronous/request-driven and already reports `RECONCILIATION_REQUIRED` on an ambiguous outcome).
 - `packages/policy-engine`: industry-independent OPA evaluation (M5) — a bounded `opa eval` CLI subprocess wrapper (never a long-running server in this implementation, despite the original `services/opa` box below), canonical input hashing and deny-by-default decisions. `packages/authorization` builds the generic policy input and calls this. Only `industries/food-wholesale/policies/{buyer,supplier}/v1/` (rego + data.json) hold actual business rules; the core package never sees a SKU, a margin, or a budget number.
-- `apps/portal`: Next.js management UI; Vercel.
+- `apps/portal`: Next.js management UI; Vercel. Scaffolded through M0–M5.1; real as of M6 — a backend-for-frontend (server-side OIDC, session, and every backend call; the browser never holds a service credential or signing key). Owns a small database of its own (sessions, portal action audit log — `node:sqlite` in this reference deployment) and its own Ed25519 signing key (published through network-api's existing JWKS endpoints), used only to mint short-lived, negotiation/content_hash-bound approval assertions after independently verifying a real OIDC session.
 - `services/opa` *(design note, not yet built this way)*: the original plan was an OPA server sidecar per organization. M5 ships the equivalent bounded-subprocess form (`packages/policy-engine` above) instead, to avoid a new always-running service for a single-process `opa eval` call; a production/customer-hosted deployment can swap in `opa run --server` behind the same `evaluate_policy()` interface without changing callers.
 - `industries/food-wholesale`: RFQ, quote, substitution and order schema, mocks and adapters, plus (M5) the buyer/supplier OPA policy bundles.
 
@@ -152,6 +184,8 @@ aimo-brain/
 **Buyer/supplier MCP databases (buyer-mcp/supplier-mcp):** each stores only its own tool-invocation audit log. Catalogue/stock/pricing/budget data itself is fictional mock data in `industries/food-wholesale`, not persisted by the MCP server — a real deployment would source it from the organization's own ERP/pricing system instead.
 
 **Agent-owned databases:** task/checkpoint state, private prompts and tool results where permitted, inbox/outbox, quotes/agreements, approval evidence, external order references and audit. Prefer separate DB roles and encryption boundaries. Supplier ERP remains authoritative for stock, prices and orders; never treat a cached snapshot as authoritative at commit time.
+
+**Portal database (M6):** sessions and the portal's own audit log of actions taken through it — nothing else. Organization, agent, negotiation, approval and order records are never duplicated here; every portal page fetches them live from the service that actually owns them.
 
 **Object store:** large artifacts, attachments, signed evidence; metadata and checksums in Postgres.
 

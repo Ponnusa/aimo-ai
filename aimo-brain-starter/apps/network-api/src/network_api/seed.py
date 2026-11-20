@@ -24,6 +24,17 @@ FICTIONAL_ORGANIZATIONS = [
         display_name="Fictional Nordic Wholesale Foods",
         verified=True,
     ),
+    # M6: a non-trading pseudo-organization that exists solely so the
+    # portal's own Ed25519 signing key can be registered and published
+    # through the same /organizations/{id}/signing-keys and /jwks.json
+    # endpoints every real organization already uses — no new key-
+    # hosting mechanism was built for the portal. Never a party to a
+    # trading relationship; never returned to buyer/supplier discovery.
+    OrganizationRecord(
+        organization_id="org_aimo_portal",
+        display_name="AIMO BRAIN Portal (service identity)",
+        verified=False,
+    ),
 ]
 
 

@@ -24,6 +24,44 @@ class OrganizationRecord(Base):
     organization_id: Mapped[str] = mapped_column(String, primary_key=True)
     display_name: Mapped[str] = mapped_column(String, nullable=False)
     verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    #: M6: the enterprise identity-provider tenant this organization's
+    #: portal logins must come from (e.g. an Entra ID ``iss``/tenant id
+    #: pair). Both nullable — an organization with no mapping set simply
+    #: cannot resolve any portal session to itself yet; this is the
+    #: actual anti-spoofing control (never an email domain, which is
+    #: never consulted for this decision).
+    oidc_issuer: Mapped[str | None] = mapped_column(String, nullable=True)
+    oidc_tenant_id: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class OrganizationMemberRecord(Base):
+    """One human's membership in one organization with one role (M6).
+
+    A person holding two roles (e.g. ``admin`` and ``approver``) gets two
+    rows, not a list column — this keeps "does X hold role Y for org Z"
+    a trivial, directly-indexable query, matching this codebase's existing
+    preference for explicit rows over packed fields. ``oidc_subject`` is
+    the verified ``sub`` claim from that organization's mapped identity
+    provider (see ``OrganizationRecord.oidc_issuer``/``oidc_tenant_id``) —
+    never a self-asserted value.
+    """
+
+    __tablename__ = "organization_members"
+    __table_args__ = (
+        UniqueConstraint(
+            "organization_id", "oidc_subject", "role", name="uq_org_member_subject_role"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    organization_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    oidc_subject: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    email: Mapped[str] = mapped_column(String, nullable=False)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class TradingRelationshipRecord(Base):

@@ -93,6 +93,24 @@ class SupplierAgentSettings(ServiceSettings):
         validation_alias="REGISTRY_API_URL",
     )
 
+    # M6: see the matching field docstrings on buyer_agent.settings.
+    service_credential_signing_secret: str = Field(
+        default="dev-only-signing-secret-change-me",
+        validation_alias="SERVICE_CREDENTIAL_SIGNING_SECRET",
+    )
+    network_internal_service_key: str = Field(
+        default="dev-only-internal-key-change-me",
+        validation_alias="NETWORK_INTERNAL_SERVICE_KEY",
+    )
+    portal_organization_id: str = Field(
+        default="org_aimo_portal",
+        validation_alias="PORTAL_ORGANIZATION_ID",
+    )
+    supplier_require_second_approver_above_amount: str | None = Field(
+        default=None,
+        validation_alias="SUPPLIER_REQUIRE_SECOND_APPROVER_ABOVE_AMOUNT",
+    )
+
 
 @lru_cache
 def get_settings() -> SupplierAgentSettings:

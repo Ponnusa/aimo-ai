@@ -17,3 +17,7 @@ node_modules/
 .DS_Store
 coverage/
 dist/
+*.sqlite3
+apps/portal/test-results/
+apps/portal/playwright-report/
+apps/portal/blob-report/

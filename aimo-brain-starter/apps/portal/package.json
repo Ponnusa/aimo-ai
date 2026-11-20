@@ -2,21 +2,24 @@
   "name": "@aimo-brain/portal",
   "version": "0.1.0",
   "private": true,
-  "description": "AIMO BRAIN management portal shell. M0 scope: a static placeholder page only; onboarding/registry/approval UI lands in M6.",
+  "description": "AIMO BRAIN organization control center and human approval portal (M6).",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
+    "jose": "^5.9.6",
     "next": "16.4.6",
     "react": "19.1.0",
     "react-dom": "19.1.0"
   },
   "devDependencies": {
-    "@types/node": "20.14.15",
+    "@playwright/test": "^1.65.1",
+    "@types/node": "^22.10.5",
     "@types/react": "19.1.0",
     "@types/react-dom": "19.1.0",
     "autoprefixer": "10.4.20",

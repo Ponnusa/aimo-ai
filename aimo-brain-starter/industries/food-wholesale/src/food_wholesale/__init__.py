@@ -16,7 +16,7 @@ from food_wholesale.negotiation import (
     build_rfq,
     evaluate_counterproposal,
 )
-from food_wholesale.policies import policy_bundle_dir, policy_query
+from food_wholesale.policies import list_policy_versions, policy_bundle_dir, policy_query
 from food_wholesale.schemas import load_schema, validate_against_schema
 
 __all__ = [
@@ -34,6 +34,7 @@ __all__ = [
     "build_rfq",
     "compute_idempotency_key",
     "evaluate_counterproposal",
+    "list_policy_versions",
     "load_schema",
     "policy_bundle_dir",
     "policy_query",

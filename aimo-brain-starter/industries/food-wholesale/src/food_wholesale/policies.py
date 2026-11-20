@@ -29,4 +29,14 @@ def policy_query(role: str, version: str) -> str:
     return f"data.aimo.{role}.{version}.decision"
 
 
-__all__ = ["policy_bundle_dir", "policy_query"]
+def list_policy_versions(role: str) -> list[str]:
+    """List every bundle version directory shipped on disk for
+    ``role`` (M6 policy catalog view) — never a live-editable list, just
+    what the current deployment actually has."""
+    role_dir = _POLICIES_DIR / role
+    if not role_dir.is_dir():
+        return []
+    return sorted(p.name for p in role_dir.iterdir() if p.is_dir())
+
+
+__all__ = ["list_policy_versions", "policy_bundle_dir", "policy_query"]

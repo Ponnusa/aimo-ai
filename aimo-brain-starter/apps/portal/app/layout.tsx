@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "AIMO BRAIN Portal",
-  description: "AIMO BRAIN management portal (M0 placeholder shell).",
+  description: "AIMO BRAIN organization control center and human approval portal.",
 };
 
 export default function RootLayout({

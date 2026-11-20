@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database import Base
@@ -161,3 +161,44 @@ class BuyerSeenMessageProofRecord(Base):
     organization_id: Mapped[str] = mapped_column(String, nullable=False)
     agent_id: Mapped[str] = mapped_column(String, nullable=False)
     seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class BuyerActivePolicyPointerRecord(Base):
+    """M6: a portal-controlled pointer to which on-disk OPA bundle
+    version is actually live for this organization, overriding
+    ``settings.buyer_policy_version`` when present. Bundle *contents*
+    remain filesystem-shipped and immutable — only this pointer is
+    portal-writable, and only by an ``admin``-role member
+    (``buyer_agent.management_api``). A single row (primary key fixed at
+    this organization's own id) so "what is active right now" is never
+    ambiguous."""
+
+    __tablename__ = "buyer_active_policy_pointer"
+
+    organization_id: Mapped[str] = mapped_column(String, primary_key=True)
+    policy_version: Mapped[str] = mapped_column(String, nullable=False)
+    updated_by: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class BuyerApprovalDecisionRecord(Base):
+    """M6: one row per distinct human decider on one approval. Most
+    approvals need only one row before ``BuyerApprovalRecord.status``
+    leaves ``PENDING``; when the organization's configured dual-control
+    amount threshold is exceeded, a second, *different* approver's row
+    is required too (``buyer_agent.authorization._required_approver_
+    count``). Unique on ``(approval_id, approver_id)`` — the same person
+    deciding twice is rejected, which is the literal single-approver
+    self-approval guard."""
+
+    __tablename__ = "buyer_approval_decisions"
+    __table_args__ = (
+        UniqueConstraint("approval_id", "approver_id", name="uq_buyer_approval_decision"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    approval_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    approver_id: Mapped[str] = mapped_column(String, nullable=False)
+    approver_issuer: Mapped[str] = mapped_column(String, nullable=False)
+    decision: Mapped[str] = mapped_column(String, nullable=False)
+    decided_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

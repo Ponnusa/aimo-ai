@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database import Base
@@ -158,3 +158,33 @@ class SupplierSeenMessageProofRecord(Base):
     organization_id: Mapped[str] = mapped_column(String, nullable=False)
     agent_id: Mapped[str] = mapped_column(String, nullable=False)
     seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class SupplierActivePolicyPointerRecord(Base):
+    """See the matching docstring on
+    ``buyer_agent.models.BuyerActivePolicyPointerRecord`` (M6)."""
+
+    __tablename__ = "supplier_active_policy_pointer"
+
+    organization_id: Mapped[str] = mapped_column(String, primary_key=True)
+    policy_version: Mapped[str] = mapped_column(String, nullable=False)
+    updated_by: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class SupplierApprovalDecisionRecord(Base):
+    """See the matching docstring on
+    ``buyer_agent.models.BuyerApprovalDecisionRecord`` (M6 dual control
+    and single-approver self-approval guard)."""
+
+    __tablename__ = "supplier_approval_decisions"
+    __table_args__ = (
+        UniqueConstraint("approval_id", "approver_id", name="uq_supplier_approval_decision"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    approval_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    approver_id: Mapped[str] = mapped_column(String, nullable=False)
+    approver_issuer: Mapped[str] = mapped_column(String, nullable=False)
+    decision: Mapped[str] = mapped_column(String, nullable=False)
+    decided_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

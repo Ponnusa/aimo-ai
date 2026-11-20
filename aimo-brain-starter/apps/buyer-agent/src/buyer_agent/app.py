@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from buyer_agent.a2a_card import build_agent_card
 from buyer_agent.a2a_executor import BuyerAgentExecutor
+from buyer_agent.management_api import create_management_router
 from buyer_agent.settings import get_settings
 from database import new_engine
 
@@ -88,6 +89,9 @@ def create_app() -> FastAPI:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         return ReadyOut(status="ok", service="buyer-agent", database="reachable")
+
+    # --- Management API (M6) --------------------------------------------
+    app.include_router(create_management_router(settings=settings, session_factory=session_factory))
 
     # --- Registry endpoint-ownership verification (M2) -----------------
     # See the matching comment in supplier_agent.app.create_app.

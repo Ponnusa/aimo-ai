@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from database import new_engine
 from supplier_agent.a2a_card import build_agent_card
 from supplier_agent.a2a_executor import SupplierAgentExecutor
+from supplier_agent.management_api import create_management_router
 from supplier_agent.settings import get_settings
 
 
@@ -91,6 +92,9 @@ def create_app() -> FastAPI:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         return ReadyOut(status="ok", service="supplier-agent", database="reachable")
+
+    # --- Management API (M6) --------------------------------------------
+    app.include_router(create_management_router(settings=settings, session_factory=session_factory))
 
     # --- Registry endpoint-ownership verification (M2) -----------------
     # registry-api issues this agent's operator a one-time challenge
