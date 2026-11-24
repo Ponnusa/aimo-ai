@@ -60,6 +60,10 @@ Terminal/exceptional states include `REJECTED`, `EXPIRED`, `CANCELLED`, `FAILED`
 9. For incompatible schema versions, reject explicitly or use a negotiated compatible version; never silently reinterpret fields.
 10. Supplier stock/price checks are refreshed at the authorized commit boundary as required by supplier policy.
 
+## Business-system adapter boundary (M7)
+
+A fourth layer, distinct from A2A (transport), the business-artifact layer above, and MCP (tool-calling): the `SupplierBusinessSystemAdapter` Protocol (`packages/business-system-integration`) that `apps/supplier-mcp`'s tool implementations call to reach a real supplier ERP/API. This is never exposed over A2A or as a new artifact type — it is purely internal to the supplier side, behind the existing MCP tool surface. See `docs/ARCHITECTURE.md`'s M7 section and `docs/integrations/` for the Valio Aimo adapter contract and pilot-readiness package.
+
 ## Discovery
 
 Agent Cards advertise skills and endpoint details. AIMO registry additionally tracks verified organization, capabilities, protocol/schema versions, trust state, relationship eligibility and endpoint verification. Registry listing is not consent to receive arbitrary transactions. Prefer capability discovery and signed/verified relationship grants over open anonymous order submission.

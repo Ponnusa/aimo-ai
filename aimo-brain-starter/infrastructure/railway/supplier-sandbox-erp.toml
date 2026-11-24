@@ -1,0 +1,17 @@
+# Railway service config for supplier-sandbox-erp.
+#
+# NOT deployed or verified against a real Railway account in this
+# session (no Railway credentials available). This documents the
+# intended independent-service shape: its own Dockerfile, its own build
+# context, its own env vars (SUPPLIER_SANDBOX_ERP_DATABASE_URL,
+# SERVICE_CREDENTIAL_SIGNING_SECRET, SUPPLIER_SANDBOX_ERP_ORGANIZATION_ID,
+# ENVIRONMENT) set directly in this Railway service. ENVIRONMENT must
+# never be set to anything other than local/staging/test in a real
+# deployment that must refuse /admin/fault-injection.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "apps/supplier-sandbox-erp/Dockerfile"
+
+[deploy]
+startCommand = "uv run --project . uvicorn supplier_sandbox_erp.app:app --host 0.0.0.0 --port 8007"
+healthcheckPath = "/health"

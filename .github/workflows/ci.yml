@@ -69,6 +69,7 @@ jobs:
           psql -h localhost -U user -d postgres -c "CREATE DATABASE aimo_supplier;"
           psql -h localhost -U user -d postgres -c "CREATE DATABASE aimo_buyer_mcp;"
           psql -h localhost -U user -d postgres -c "CREATE DATABASE aimo_supplier_mcp;"
+          psql -h localhost -U user -d postgres -c "CREATE DATABASE aimo_supplier_sandbox_erp;"
 
       - name: Lint (ruff check)
         run: uv run ruff check .
@@ -101,6 +102,10 @@ jobs:
 
       - name: Run supplier-mcp migrations
         working-directory: aimo-brain-starter/apps/supplier-mcp
+        run: uv run --project ../.. alembic -c alembic.ini upgrade head
+
+      - name: Run supplier-sandbox-erp migrations
+        working-directory: aimo-brain-starter/apps/supplier-sandbox-erp
         run: uv run --project ../.. alembic -c alembic.ini upgrade head
 
       - name: Run tests
@@ -161,7 +166,15 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        agent: [buyer-agent, supplier-agent, registry-api, buyer-mcp, supplier-mcp]
+        agent:
+          [
+            buyer-agent,
+            supplier-agent,
+            registry-api,
+            buyer-mcp,
+            supplier-mcp,
+            supplier-sandbox-erp,
+          ]
     steps:
       - uses: actions/checkout@v5
 

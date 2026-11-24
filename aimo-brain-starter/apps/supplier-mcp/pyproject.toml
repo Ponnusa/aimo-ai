@@ -14,6 +14,7 @@ dependencies = [
   "identity",
   "mcp-integration",
   "aimo-food-wholesale",
+  "business-system-integration",
 ]
 
 [build-system]

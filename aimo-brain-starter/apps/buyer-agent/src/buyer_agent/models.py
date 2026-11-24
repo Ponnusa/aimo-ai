@@ -145,6 +145,24 @@ class BuyerOrderRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
+class BuyerOrderReconciliationEventRecord(Base):
+    """One row per worker reconciliation attempt against a
+    ``buyer_orders`` row (M7) -- a durable history list, surfaced
+    through ``/management/integration/reconciliation`` for the portal's
+    "reconciliation history" view. See the matching
+    ``supplier_agent.models.SupplierOrderReconciliationEventRecord``."""
+
+    __tablename__ = "buyer_order_reconciliation_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    negotiation_id: Mapped[str] = mapped_column(String, nullable=False)
+    previous_state: Mapped[str] = mapped_column(String, nullable=False)
+    new_state: Mapped[str] = mapped_column(String, nullable=False)
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 class BuyerSeenMessageProofRecord(Base):
     """Replay protection for every inbound, proof-signed artifact (M5.1):
     one row per signed message's ``jti``. ``jti`` is UNIQUE — a resent

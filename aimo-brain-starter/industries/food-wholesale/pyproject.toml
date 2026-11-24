@@ -7,6 +7,8 @@ dependencies = [
   "pydantic>=2.9.0",
   "jsonschema>=4.23.0",
   "trade-protocol",
+  "business-system-integration",
+  "httpx>=0.27.2",
 ]
 
 [build-system]

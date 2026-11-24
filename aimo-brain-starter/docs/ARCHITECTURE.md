@@ -113,10 +113,47 @@ flowchart TB
   BM --> BMD[(Buyer MCP Neon DB)]
   SM --> SMD[(Supplier MCP Neon DB)]
   BM --> BE[Buyer ERP / Mock]
-  SM --> SE[Supplier ERP / Mock]
+  SM -->|SupplierBusinessSystemAdapter| SADP{{Configured adapter}}
+  SADP -->|mock, in-process| SE[Mock catalogue/order]
+  SADP -->|sandbox, real HTTP, scoped credential| SBX[Supplier Sandbox ERP]
+  SADP -.->|valio_aimo, unimplemented| VAL[(Valio Aimo - not yet authorized)]
+  SBX --> SBXD[(Sandbox ERP own DB)]
   B --> BD[(Buyer private state)]
   S --> SD[(Supplier private state)]
 ```
+
+As of M7 (see `docs/DECISIONS.md` ADR-014), `apps/supplier-mcp` no longer
+imports `food_wholesale.adapters.mock` functions directly for its
+catalogue/pricing/availability/order tools (except
+`search_catalogue`/`check_inventory`'s legacy merged shape, preserved
+only for the default `mock` adapter — see ADR-014). Instead it resolves
+a `business_system_integration.SupplierBusinessSystemAdapter` (new,
+industry-independent package: a `Protocol`, normalized decimal-string
+data shapes, and a typed error hierarchy) via
+`supplier_mcp.adapter_factory.get_adapter`, keyed by
+`SUPPLIER_BUSINESS_SYSTEM_ADAPTER` (`mock` default / `sandbox` /
+`valio_aimo`). `industries/food-wholesale/adapters/sandbox.SandboxErpAdapter`
+implements that Protocol against a new standalone service,
+`apps/supplier-sandbox-erp` — a realistic stand-in for an external
+ERP/API (customer-specific prices, stock that decrements on confirmed
+orders, minimum-order-quantity/substitution, a delivery-cutoff flag, and
+an environment-gated fault-injection surface for deterministic
+transient-error/timeout/delayed-acknowledgement testing), reached only
+over real HTTP with its own network-api-minted `use_sandbox_erp`-scoped
+credential — never a direct database connection, matching every other
+intra-network service boundary.
+`industries/food-wholesale/adapters/valio_aimo.ValioAimoAdapter`
+implements the same Protocol with every method raising
+`NotImplementedError` (see `docs/integrations/valio-aimo-adapter-contract.md`)
+— proving the boundary without inventing an undocumented endpoint, per
+`CLAUDE.md`'s explicit rule against accessing Valio Aimo systems without
+authorization. Supplier-side reconciliation (`apps/worker`,
+`WORKER_ROLE=supplier`) is real as of M7, closing the M5.1/ADR-012
+documented no-op gap: it retries `supplier_orders` rows stuck in
+`RECONCILIATION_REQUIRED` by re-invoking
+`supplier_agent.commitment.reconcile_pending_order`, which re-asks the
+adapter's `get_order_status` (via supplier-mcp) rather than
+re-submitting the order.
 
 In a managed environment, separate Neon databases or rigorously isolated schemas/roles may implement each store. Self-hosted agents use their own storage. **No cross-organization SQL joins to exchange business data, and no cross-*service* database access either** — registry-api and network-api each own one database and talk to each other only over HTTP.
 
@@ -128,11 +165,13 @@ In a managed environment, separate Neon databases or rigorously isolated schemas
 - `apps/supplier-agent`: independent A2A endpoint, LangGraph workflow, supplier MCP client (calls `apps/supplier-mcp` only), nonbinding quote/counteroffer negotiation (M4, own negotiation/proposal tables plus an inbound-artifact replay-dedup cache), independent OPA policy evaluation, durable human approval and authorization-evidence exchange, and commitment handling that calls its own `supplier-mcp`'s execution tool (M5, own `supplier_approvals`/`supplier_authorization_evidence`/`supplier_orders` tables), private state, and the same M6 `/management` API addition as buyer-agent.
 - `apps/buyer-mcp`: buyer organization's own MCP tool server (purchase requirements, budget, approved suppliers, purchase approval — a mock decision, not OPA). Independently deployable; own database (tool-invocation audit log); scoped-credential-authenticated; never serves any other organization.
 - `apps/supplier-mcp`: supplier organization's own MCP tool server (catalogue search, inventory, customer price, delivery options — read-only, `use_supplier_tools` scope). As of M5, also exposes `execute_order`/`get_order_status` (the approved mock order adapter), gated by a separate, narrower `execute_order` scope and backed by its own `supplier_mcp_orders` table with a UNIQUE `idempotency_key` constraint — the actual idempotency authority for commits, independent of supplier-agent's own audit copy. Independently deployable; own database; scoped-credential-authenticated; never serves any other organization.
-- `apps/worker`: retry, timeout, inbox/outbox dispatch and reconciliation. Scaffolded in M0–M4; real as of M5.1 — role-parameterized (`WORKER_ROLE=buyer|supplier`, one deployment per organization, each against only its own agent's database), it retries a buyer-side commit stuck in `COMMITTING`/`RECONCILIATION_REQUIRED` past a backoff, bounded by a durable per-row attempt count, by re-invoking `buyer_agent.commitment.run_authorization_and_commitment` — the same idempotent entry point a live request uses, never a separate "worker version" of the logic. The supplier role is currently a documented no-op (supplier-side commit handling is synchronous/request-driven and already reports `RECONCILIATION_REQUIRED` on an ambiguous outcome).
+- `apps/worker`: retry, timeout, inbox/outbox dispatch and reconciliation. Scaffolded in M0–M4; real as of M5.1 (buyer role) and M7 (supplier role) — role-parameterized (`WORKER_ROLE=buyer|supplier`, one deployment per organization, each against only its own agent's database). The buyer role retries a commit stuck in `COMMITTING`/`RECONCILIATION_REQUIRED` past a backoff, bounded by a durable per-row attempt count, by re-invoking `buyer_agent.commitment.run_authorization_and_commitment`. The supplier role (M7) retries an order stuck in `RECONCILIATION_REQUIRED` by re-invoking `supplier_agent.commitment.reconcile_pending_order`, which re-asks the configured adapter's order-status lookup (via supplier-mcp) rather than re-submitting — the correct direction for a role that never initiates a commit, only resolves an ambiguous `execute_order` outcome.
+- `apps/supplier-sandbox-erp` (M7): a standalone service simulating a realistic external supplier ERP/API over real HTTP — own database, own Dockerfile/Railway config. Exists so `apps/supplier-mcp`'s adapter abstraction can be proven against something that actually behaves like stock changing, orders being delayed-acknowledged, and calls transiently failing — not just an in-memory happy-path mock. Never reached by any agent directly; only `supplier-mcp`'s configured adapter calls it, over a network-api-minted `use_sandbox_erp`-scoped credential.
+- `packages/business-system-integration` (M7): the industry-independent `SupplierBusinessSystemAdapter` Protocol, normalized decimal-string data shapes and typed error hierarchy (`AdapterUnavailableError`/`AdapterAuthenticationError`/`AdapterInvalidRequestError`/`AdapterMalformedResponseError`) that any real business-system integration implements. Mirrors `packages/agent-runtime`'s `LLMAdapter` Protocol+fake pattern. Never imports `industries/*` — core stays generic.
 - `packages/policy-engine`: industry-independent OPA evaluation (M5) — a bounded `opa eval` CLI subprocess wrapper (never a long-running server in this implementation, despite the original `services/opa` box below), canonical input hashing and deny-by-default decisions. `packages/authorization` builds the generic policy input and calls this. Only `industries/food-wholesale/policies/{buyer,supplier}/v1/` (rego + data.json) hold actual business rules; the core package never sees a SKU, a margin, or a budget number.
 - `apps/portal`: Next.js management UI; Vercel. Scaffolded through M0–M5.1; real as of M6 — a backend-for-frontend (server-side OIDC, session, and every backend call; the browser never holds a service credential or signing key). Owns a small database of its own (sessions, portal action audit log — `node:sqlite` in this reference deployment) and its own Ed25519 signing key (published through network-api's existing JWKS endpoints), used only to mint short-lived, negotiation/content_hash-bound approval assertions after independently verifying a real OIDC session.
 - `services/opa` *(design note, not yet built this way)*: the original plan was an OPA server sidecar per organization. M5 ships the equivalent bounded-subprocess form (`packages/policy-engine` above) instead, to avoid a new always-running service for a single-process `opa eval` call; a production/customer-hosted deployment can swap in `opa run --server` behind the same `evaluate_policy()` interface without changing callers.
-- `industries/food-wholesale`: RFQ, quote, substitution and order schema, mocks and adapters, plus (M5) the buyer/supplier OPA policy bundles.
+- `industries/food-wholesale`: RFQ, quote, substitution and order schema, mocks and adapters, plus (M5) the buyer/supplier OPA policy bundles. As of M7, `adapters/` also holds `sandbox` (the real sandbox-ERP-backed adapter implementation) and `valio_aimo` (the documented-but-unimplemented Valio Aimo adapter boundary) alongside the original `mock`.
 
 ## Proposed repository layout
 
@@ -145,6 +184,7 @@ aimo-brain/
     supplier-agent/
     buyer-mcp/
     supplier-mcp/
+    supplier-sandbox-erp/  # M7: realistic sandbox ERP/API, own DB
     worker/
     portal/
   packages/
@@ -158,11 +198,13 @@ aimo-brain/
     database/
     policy-engine/
     message-integrity/
+    business-system-integration/  # M7: generic supplier adapter interface
   industries/
     food-wholesale/
       schemas/
       adapters/mock/
-      adapters/valio-aimo/  # only after permission and API access
+      adapters/sandbox/      # M7: real adapter against supplier-sandbox-erp
+      adapters/valio_aimo/   # M7: documented boundary only after permission and API access
   infrastructure/
     docker/
     railway/
@@ -181,7 +223,9 @@ aimo-brain/
 
 **Registry database (registry-api):** agents, endpoint-verification challenges and status, indexed capabilities, registry audit trail. Deliberately does not store organization records or relationships — those are network-api's, looked up over HTTP, never joined.
 
-**Buyer/supplier MCP databases (buyer-mcp/supplier-mcp):** each stores only its own tool-invocation audit log. Catalogue/stock/pricing/budget data itself is fictional mock data in `industries/food-wholesale`, not persisted by the MCP server — a real deployment would source it from the organization's own ERP/pricing system instead.
+**Buyer/supplier MCP databases (buyer-mcp/supplier-mcp):** each stores only its own tool-invocation audit log, plus (supplier-mcp) its own `supplier_mcp_orders` idempotency-authority table. Catalogue/stock/pricing/budget data itself is fictional mock data in `industries/food-wholesale` by default, or (M7) sourced from `apps/supplier-sandbox-erp`'s own database over HTTP — never persisted or read directly by the MCP server either way; a real deployment sources it from the organization's own ERP/pricing system via the configured adapter.
+
+**Supplier sandbox ERP database (M7, `apps/supplier-sandbox-erp`):** its own products/stock, customer prices and orders — deliberately separate from `supplier_mcp_orders`, which remains AIMO's own durable idempotency authority regardless of what the configured adapter reports underneath.
 
 **Agent-owned databases:** task/checkpoint state, private prompts and tool results where permitted, inbox/outbox, quotes/agreements, approval evidence, external order references and audit. Prefer separate DB roles and encryption boundaries. Supplier ERP remains authoritative for stock, prices and orders; never treat a cached snapshot as authoritative at commit time.
 

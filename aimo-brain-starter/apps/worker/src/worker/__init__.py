@@ -23,11 +23,15 @@ because the idempotency_key never changes and the supplier's own
 ``supplier_mcp_orders`` UNIQUE constraint is the actual enforcement
 point regardless of how many times this is retried.
 
-Supplier role: currently a no-op placeholder (supplier-side commit
-handling is synchronous, request-driven, and already records
-``RECONCILIATION_REQUIRED`` on an ambiguous ``execute_order`` outcome;
-a supplier-initiated retry loop is a documented follow-up, not yet
-needed since the buyer is the only side that initiates a commit).
+Supplier role (real as of M7, closing the M5.1/ADR-012-documented gap):
+retries ``supplier_orders`` rows stuck in ``RECONCILIATION_REQUIRED``
+past a backoff threshold, bounded by the same per-row attempt count, by
+re-invoking ``supplier_agent.commitment.reconcile_pending_order`` — the
+same idempotent, re-callable shape as the buyer role, but re-asking the
+business system's own order status rather than re-submitting a commit
+(the supplier side never initiates a commit; it only ever resolves an
+ambiguous ``execute_order`` outcome against supplier-mcp's durable
+idempotency authority).
 """
 
 from __future__ import annotations
@@ -81,8 +85,8 @@ async def run_dispatch_cycle(
             retry_backoff_seconds=retry_backoff_seconds, max_attempts=max_attempts
         )
     if resolved_role == "supplier":
-        return DispatchCycleResult(
-            role="supplier", attempted=0, recovered=0, still_pending=0, exhausted=0
+        return await _run_supplier_cycle(
+            retry_backoff_seconds=retry_backoff_seconds, max_attempts=max_attempts
         )
     raise ValueError(f"Unknown worker role {resolved_role!r}.")
 
@@ -150,6 +154,82 @@ async def _run_buyer_cycle(*, retry_backoff_seconds: int, max_attempts: int) -> 
 
         return DispatchCycleResult(
             role="buyer",
+            attempted=len(pending),
+            recovered=recovered,
+            still_pending=still_pending,
+            exhausted=exhausted,
+        )
+    finally:
+        await engine.dispose()
+
+
+async def _run_supplier_cycle(
+    *, retry_backoff_seconds: int, max_attempts: int
+) -> DispatchCycleResult:
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+    from supplier_agent.commitment import (
+        RETRYABLE_SUPPLIER_ORDER_STATES,
+        CommitmentError,
+        reconcile_pending_order,
+    )
+    from supplier_agent.models import SupplierOrderRecord
+    from supplier_agent.settings import get_settings
+
+    from database import new_engine
+
+    settings = get_settings()
+    engine = new_engine(settings.supplier_database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    now = datetime.now(UTC).replace(tzinfo=None)
+    cutoff = now - timedelta(seconds=retry_backoff_seconds)
+
+    try:
+        async with session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(SupplierOrderRecord).where(
+                            SupplierOrderRecord.state.in_(RETRYABLE_SUPPLIER_ORDER_STATES),
+                            SupplierOrderRecord.updated_at <= cutoff,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            pending = [row.id for row in rows if row.attempts < max_attempts]
+            exhausted = sum(1 for row in rows if row.attempts >= max_attempts)
+
+        recovered = 0
+        still_pending = 0
+        for order_id in pending:
+            try:
+                resolved_state = await reconcile_pending_order(
+                    order_id, settings=settings, session_factory=session_factory
+                )
+                if resolved_state in ("CONFIRMED", "FAILED"):
+                    recovered += 1
+                    logger.info(
+                        "worker(supplier): resolved order id=%s to %s", order_id, resolved_state
+                    )
+                else:
+                    still_pending += 1
+            except CommitmentError as exc:
+                still_pending += 1
+                logger.warning("worker(supplier): order id=%s still unresolved: %s", order_id, exc)
+
+        if exhausted:
+            logger.error(
+                "worker(supplier): %d order(s) exceeded max_attempts=%d and are left "
+                "RECONCILIATION_REQUIRED for manual attention.",
+                exhausted,
+                max_attempts,
+            )
+
+        return DispatchCycleResult(
+            role="supplier",
             attempted=len(pending),
             recovered=recovered,
             still_pending=still_pending,

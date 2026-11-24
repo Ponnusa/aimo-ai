@@ -40,6 +40,7 @@ from buyer_agent.models import (
     BuyerApprovalRecord,
     BuyerAuthorizationEvidenceRecord,
     BuyerNegotiationRecord,
+    BuyerOrderReconciliationEventRecord,
     BuyerOrderRecord,
 )
 from buyer_agent.settings import BuyerAgentSettings
@@ -93,6 +94,27 @@ class OrderOut(BaseModel):
     state: str
     external_order_id: str | None
     attempts: int
+    last_error: str | None = None
+
+
+class IntegrationHealthOut(BaseModel):
+    """M7: order-state health as this organization's own durable
+    `buyer_orders` outbox sees it."""
+
+    committing_orders: int
+    reconciliation_required_orders: int
+    failed_orders: int
+    confirmed_orders: int
+    total_orders: int
+
+
+class ReconciliationEventOut(BaseModel):
+    order_id: int
+    negotiation_id: str
+    previous_state: str
+    new_state: str
+    detail: str
+    created_at: str
 
 
 class PolicyCatalogOut(BaseModel):
@@ -281,10 +303,15 @@ def create_management_router(*, settings: BuyerAgentSettings, session_factory) -
         ]
 
     @router.get("/orders", response_model=list[OrderOut])
-    async def list_orders(authorization: str | None = Header(default=None)) -> list[OrderOut]:
+    async def list_orders(
+        state: str | None = None, authorization: str | None = Header(default=None)
+    ) -> list[OrderOut]:
         _require_credential(authorization)
         async with session_factory() as session:
-            rows = (await session.execute(select(BuyerOrderRecord))).scalars().all()
+            query = select(BuyerOrderRecord)
+            if state is not None:
+                query = query.where(BuyerOrderRecord.state == state)
+            rows = (await session.execute(query)).scalars().all()
         return [
             OrderOut(
                 negotiation_id=row.negotiation_id,
@@ -293,6 +320,53 @@ def create_management_router(*, settings: BuyerAgentSettings, session_factory) -
                 state=row.state,
                 external_order_id=row.external_order_id,
                 attempts=row.attempts,
+                last_error=row.last_error,
+            )
+            for row in rows
+        ]
+
+    @router.get("/integration/health", response_model=IntegrationHealthOut)
+    async def integration_health(
+        authorization: str | None = Header(default=None),
+    ) -> IntegrationHealthOut:
+        _require_credential(authorization)
+        async with session_factory() as session:
+            rows = (await session.execute(select(BuyerOrderRecord))).scalars().all()
+        return IntegrationHealthOut(
+            committing_orders=sum(1 for r in rows if r.state == "COMMITTING"),
+            reconciliation_required_orders=sum(
+                1 for r in rows if r.state == "RECONCILIATION_REQUIRED"
+            ),
+            failed_orders=sum(1 for r in rows if r.state == "FAILED"),
+            confirmed_orders=sum(1 for r in rows if r.state == "CONFIRMED"),
+            total_orders=len(rows),
+        )
+
+    @router.get("/integration/reconciliation", response_model=list[ReconciliationEventOut])
+    async def integration_reconciliation_history(
+        authorization: str | None = Header(default=None),
+    ) -> list[ReconciliationEventOut]:
+        _require_credential(authorization)
+        async with session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(BuyerOrderReconciliationEventRecord).order_by(
+                            BuyerOrderReconciliationEventRecord.id.desc()
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return [
+            ReconciliationEventOut(
+                order_id=row.order_id,
+                negotiation_id=row.negotiation_id,
+                previous_state=row.previous_state,
+                new_state=row.new_state,
+                detail=row.detail,
+                created_at=row.created_at.isoformat(),
             )
             for row in rows
         ]

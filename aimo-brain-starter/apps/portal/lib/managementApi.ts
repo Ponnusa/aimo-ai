@@ -44,6 +44,29 @@ export interface OrderOut {
   idempotency_key: string;
   state: string;
   external_order_id: string | null;
+  attempts: number;
+  last_error: string | null;
+}
+
+// M7: integration health / reconciliation history. supplier-agent's
+// shape has no "committing_orders" field (the supplier side never
+// initiates a commit); it is optional here rather than duplicating the
+// interface for each role.
+export interface IntegrationHealthOut {
+  committing_orders?: number;
+  reconciliation_required_orders: number;
+  failed_orders: number;
+  confirmed_orders: number;
+  total_orders: number;
+}
+
+export interface ReconciliationEventOut {
+  order_id: number;
+  negotiation_id: string;
+  previous_state: string;
+  new_state: string;
+  detail: string;
+  created_at: string;
 }
 
 export interface PolicyCatalogOut {
@@ -119,9 +142,24 @@ export async function listEvidence(organizationId: string): Promise<EvidenceOut[
   return response.json();
 }
 
-export async function listOrders(organizationId: string): Promise<OrderOut[]> {
-  const response = await managementFetch(organizationId, `/orders`);
+export async function listOrders(organizationId: string, state?: string): Promise<OrderOut[]> {
+  const query = state ? `?state=${encodeURIComponent(state)}` : "";
+  const response = await managementFetch(organizationId, `/orders${query}`);
   if (!response.ok) throw new Error(`list orders failed: ${response.status}`);
+  return response.json();
+}
+
+export async function getIntegrationHealth(organizationId: string): Promise<IntegrationHealthOut> {
+  const response = await managementFetch(organizationId, `/integration/health`);
+  if (!response.ok) throw new Error(`integration health failed: ${response.status}`);
+  return response.json();
+}
+
+export async function listReconciliationHistory(
+  organizationId: string,
+): Promise<ReconciliationEventOut[]> {
+  const response = await managementFetch(organizationId, `/integration/reconciliation`);
+  if (!response.ok) throw new Error(`reconciliation history failed: ${response.status}`);
   return response.json();
 }
 

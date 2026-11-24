@@ -39,6 +39,30 @@ class SupplierMcpSettings(ServiceSettings):
         validation_alias="SERVICE_CREDENTIAL_SIGNING_SECRET",
     )
 
+    # M7: which SupplierBusinessSystemAdapter this deployment uses.
+    # "mock" (default) is the unchanged M0-M6 in-process fictional
+    # catalogue/order behavior. "sandbox" talks to the realistic
+    # supplier-sandbox-erp service over real HTTP. "valio_aimo" is
+    # registered but unimplemented pending authorized API access — see
+    # food_wholesale.adapters.valio_aimo.
+    supplier_business_system_adapter: str = Field(
+        default="mock", validation_alias="SUPPLIER_BUSINESS_SYSTEM_ADAPTER"
+    )
+
+    # Only read when supplier_business_system_adapter == "sandbox".
+    sandbox_erp_base_url: str = Field(
+        default="http://localhost:8007", validation_alias="SANDBOX_ERP_BASE_URL"
+    )
+
+    # A long-lived, use_sandbox_erp-scoped credential this deployment
+    # presents to supplier-sandbox-erp — the same "pre-provisioned
+    # intra-organization credential" pattern as
+    # buyer_agent.settings.buyer_mcp_service_credential, not a per-call
+    # mint against network-api.
+    sandbox_erp_service_credential: str = Field(
+        default="", validation_alias="SANDBOX_ERP_SERVICE_CREDENTIAL"
+    )
+
 
 @lru_cache
 def get_settings() -> SupplierMcpSettings:

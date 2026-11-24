@@ -244,3 +244,78 @@ async def test_policy_catalog_dry_run_and_activate() -> None:
             headers={"Authorization": f"Bearer {admin_token}"},
         )
         assert bad_version.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_integration_health_and_reconciliation_history() -> None:
+    from datetime import UTC, datetime
+
+    from buyer_agent.models import BuyerOrderReconciliationEventRecord, BuyerOrderRecord
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    app, settings = await _fresh_app()
+    engine = new_engine(settings.buyer_database_url)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    now = datetime.now(UTC).replace(tzinfo=None)
+    async with session_factory() as session:
+        order = BuyerOrderRecord(
+            negotiation_id="neg_mgmt_test",
+            content_hash="sha256:mgmt",
+            idempotency_key="idem_mgmt_test",
+            state="RECONCILIATION_REQUIRED",
+            external_order_id=None,
+            attempts=1,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(order)
+        await session.flush()
+        session.add(
+            BuyerOrderReconciliationEventRecord(
+                order_id=order.id,
+                negotiation_id="neg_mgmt_test",
+                previous_state="COMMITTING",
+                new_state="RECONCILIATION_REQUIRED",
+                detail="seeded for test",
+                created_at=now,
+            )
+        )
+        await session.commit()
+    await engine.dispose()
+
+    token = issue_service_credential(
+        organization_id=settings.buyer_organization_id,
+        scope="manage_organization",
+        signing_secret=settings.service_credential_signing_secret,
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        health = await client.get(
+            "/management/integration/health", headers={"Authorization": f"Bearer {token}"}
+        )
+        assert health.status_code == 200
+        assert health.json() == {
+            "committing_orders": 0,
+            "reconciliation_required_orders": 1,
+            "failed_orders": 0,
+            "confirmed_orders": 0,
+            "total_orders": 1,
+        }
+
+        history = await client.get(
+            "/management/integration/reconciliation",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert history.status_code == 200
+        events = history.json()
+        assert len(events) == 1
+        assert events[0]["negotiation_id"] == "neg_mgmt_test"
+        assert events[0]["new_state"] == "RECONCILIATION_REQUIRED"
+
+        orders = await client.get(
+            "/management/orders",
+            params={"state": "RECONCILIATION_REQUIRED"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert orders.status_code == 200
+        assert orders.json()[0]["idempotency_key"] == "idem_mgmt_test"

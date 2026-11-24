@@ -25,6 +25,19 @@ NETWORK_SRC = REPO_ROOT / "apps" / "network-api" / "src"
 REGISTRY_SRC = REPO_ROOT / "apps" / "registry-api" / "src"
 BUYER_MCP_SRC = REPO_ROOT / "apps" / "buyer-mcp" / "src"
 SUPPLIER_MCP_SRC = REPO_ROOT / "apps" / "supplier-mcp" / "src"
+SANDBOX_ERP_SRC = REPO_ROOT / "apps" / "supplier-sandbox-erp" / "src"
+BUSINESS_SYSTEM_INTEGRATION_SRC = REPO_ROOT / "packages" / "business-system-integration" / "src"
+AGENT_RUNTIME_SRC = REPO_ROOT / "packages" / "agent-runtime" / "src"
+TRADE_PROTOCOL_SRC = REPO_ROOT / "packages" / "trade-protocol" / "src"
+VALIO_AIMO_SRC = (
+    REPO_ROOT
+    / "industries"
+    / "food-wholesale"
+    / "src"
+    / "food_wholesale"
+    / "adapters"
+    / "valio_aimo"
+)
 
 
 def _top_level_imports(package_dir: Path) -> set[str]:
@@ -198,3 +211,50 @@ def test_each_agent_settings_reads_a_distinct_database_env_var() -> None:
     assert db_alias_pattern.findall(registry_settings) == ["REGISTRY_DATABASE_URL"]
     assert db_alias_pattern.findall(buyer_mcp_settings) == ["BUYER_MCP_DATABASE_URL"]
     assert db_alias_pattern.findall(supplier_mcp_settings) == ["SUPPLIER_MCP_DATABASE_URL"]
+
+
+def test_sandbox_erp_is_a_separate_service_with_its_own_database() -> None:
+    """M7: ``supplier-sandbox-erp`` is its own independently deployable
+    service with its own database -- never shares a connection with
+    supplier-mcp or any agent, and nothing outside it may reach its
+    database directly (only supplier-mcp's adapter reaches it, over
+    HTTP, like any other external business system)."""
+    imports = _top_level_imports(SANDBOX_ERP_SRC)
+    assert "supplier_mcp" not in imports
+    assert "supplier_agent" not in imports
+    assert "buyer_agent" not in imports
+    assert "food_wholesale" not in imports
+
+    sandbox_erp_settings = (
+        REPO_ROOT / "apps" / "supplier-sandbox-erp" / "src" / "supplier_sandbox_erp" / "settings.py"
+    ).read_text(encoding="utf-8")
+    import re
+
+    db_alias_pattern = re.compile(r'validation_alias="(\w*DATABASE_URL)"')
+    assert db_alias_pattern.findall(sandbox_erp_settings) == ["SUPPLIER_SANDBOX_ERP_DATABASE_URL"]
+
+
+def test_core_packages_never_import_industries() -> None:
+    """M7: the generic adapter interface
+    (``business-system-integration``) and every other core package stay
+    industry-independent -- per CLAUDE.md, "no SKU assumptions in
+    core." Only ``apps/supplier-mcp`` and ``industries/food-wholesale``
+    itself may know about food-wholesale or Valio Aimo specifics."""
+    for src in (BUSINESS_SYSTEM_INTEGRATION_SRC, AGENT_RUNTIME_SRC, TRADE_PROTOCOL_SRC):
+        imports = _top_level_imports(src)
+        assert "food_wholesale" not in imports
+        assert "supplier_sandbox_erp" not in imports
+
+
+def test_valio_aimo_adapter_makes_no_network_calls() -> None:
+    """M7: the Valio Aimo adapter boundary is a structural contract
+    only -- every method raises ``NotImplementedError`` rather than
+    guessing at an undocumented endpoint, per CLAUDE.md ("Never access
+    Valio Aimo production systems... without explicit authorization").
+    A static check that it imports no HTTP client is a stronger
+    guarantee than a docstring: it cannot regress into a real network
+    call without this test catching it first."""
+    imports = _top_level_imports(VALIO_AIMO_SRC)
+    assert "httpx" not in imports
+    assert "requests" not in imports
+    assert "aiohttp" not in imports

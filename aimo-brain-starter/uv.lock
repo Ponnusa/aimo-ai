@@ -15,6 +15,7 @@ members = [
     "aimo-food-wholesale",
     "audit",
     "authorization",
+    "business-system-integration",
     "buyer-agent",
     "buyer-mcp",
     "database",
@@ -26,6 +27,7 @@ members = [
     "registry-api",
     "supplier-agent",
     "supplier-mcp",
+    "supplier-sandbox-erp",
     "trade-protocol",
     "worker",
 ]
@@ -118,6 +120,8 @@ name = "aimo-food-wholesale"
 version = "0.1.0"
 source = { editable = "industries/food-wholesale" }
 dependencies = [
+    { name = "business-system-integration" },
+    { name = "httpx" },
     { name = "jsonschema" },
     { name = "pydantic" },
     { name = "trade-protocol" },
@@ -125,6 +129,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "business-system-integration", editable = "packages/business-system-integration" },
+    { name = "httpx", specifier = ">=0.27.2" },
     { name = "jsonschema", specifier = ">=4.23.0" },
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "trade-protocol", editable = "packages/trade-protocol" },
@@ -300,6 +306,11 @@ requires-dist = [
     { name = "policy-engine", editable = "packages/policy-engine" },
     { name = "pydantic", specifier = ">=2.9.0" },
 ]
+
+[[package]]
+name = "business-system-integration"
+version = "0.1.0"
+source = { editable = "packages/business-system-integration" }
 
 [[package]]
 name = "buyer-agent"
@@ -2226,6 +2237,7 @@ source = { editable = "apps/supplier-mcp" }
 dependencies = [
     { name = "aimo-food-wholesale" },
     { name = "alembic" },
+    { name = "business-system-integration" },
     { name = "database" },
     { name = "fastapi" },
     { name = "identity" },
@@ -2240,11 +2252,37 @@ dependencies = [
 requires-dist = [
     { name = "aimo-food-wholesale", editable = "industries/food-wholesale" },
     { name = "alembic", specifier = ">=1.13.2" },
+    { name = "business-system-integration", editable = "packages/business-system-integration" },
     { name = "database", editable = "packages/database" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "identity", editable = "packages/identity" },
     { name = "mcp", specifier = "==1.30.0" },
     { name = "mcp-integration", editable = "packages/mcp-integration" },
+    { name = "pydantic", specifier = ">=2.9.0" },
+    { name = "pydantic-settings", specifier = ">=2.4.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.6" },
+]
+
+[[package]]
+name = "supplier-sandbox-erp"
+version = "0.1.0"
+source = { editable = "apps/supplier-sandbox-erp" }
+dependencies = [
+    { name = "alembic" },
+    { name = "database" },
+    { name = "fastapi" },
+    { name = "identity" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.13.2" },
+    { name = "database", editable = "packages/database" },
+    { name = "fastapi", specifier = ">=0.115.0" },
+    { name = "identity", editable = "packages/identity" },
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "pydantic-settings", specifier = ">=2.4.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.6" },

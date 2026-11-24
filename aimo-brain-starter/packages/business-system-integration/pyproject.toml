@@ -1,0 +1,13 @@
+[project]
+name = "business-system-integration"
+version = "0.1.0"
+description = "Industry-independent supplier business-system adapter interface (M7): a Protocol a real ERP/API integration implements, normalized wire-agnostic data shapes, and a typed error hierarchy. No food-wholesale, Valio Aimo or any other business-specific assumption lives here."
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/business_system_integration"]

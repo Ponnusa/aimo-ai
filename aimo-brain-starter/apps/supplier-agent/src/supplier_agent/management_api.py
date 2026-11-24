@@ -24,6 +24,7 @@ from supplier_agent.models import (
     SupplierApprovalRecord,
     SupplierAuthorizationEvidenceRecord,
     SupplierNegotiationRecord,
+    SupplierOrderReconciliationEventRecord,
     SupplierOrderRecord,
 )
 from supplier_agent.settings import SupplierAgentSettings
@@ -75,6 +76,31 @@ class OrderOut(BaseModel):
     idempotency_key: str
     state: str
     external_order_id: str | None
+    #: M7: 0 for rows created before this milestone's migration.
+    attempts: int = 0
+    last_error: str | None = None
+
+
+class IntegrationHealthOut(BaseModel):
+    """M7: order-state health as this organization's own durable
+    `supplier_orders` audit copy sees it -- this agent never talks to
+    the configured business-system adapter directly (only
+    supplier-mcp does), so this reflects commit/reconciliation outcomes,
+    not catalogue/pricing connectivity."""
+
+    reconciliation_required_orders: int
+    failed_orders: int
+    confirmed_orders: int
+    total_orders: int
+
+
+class ReconciliationEventOut(BaseModel):
+    order_id: int
+    negotiation_id: str
+    previous_state: str
+    new_state: str
+    detail: str
+    created_at: str
 
 
 class PolicyCatalogOut(BaseModel):
@@ -250,10 +276,15 @@ def create_management_router(*, settings: SupplierAgentSettings, session_factory
         ]
 
     @router.get("/orders", response_model=list[OrderOut])
-    async def list_orders(authorization: str | None = Header(default=None)) -> list[OrderOut]:
+    async def list_orders(
+        state: str | None = None, authorization: str | None = Header(default=None)
+    ) -> list[OrderOut]:
         _require_credential(authorization)
         async with session_factory() as session:
-            rows = (await session.execute(select(SupplierOrderRecord))).scalars().all()
+            query = select(SupplierOrderRecord)
+            if state is not None:
+                query = query.where(SupplierOrderRecord.state == state)
+            rows = (await session.execute(query)).scalars().all()
         return [
             OrderOut(
                 negotiation_id=row.negotiation_id,
@@ -261,6 +292,58 @@ def create_management_router(*, settings: SupplierAgentSettings, session_factory
                 idempotency_key=row.idempotency_key,
                 state=row.state,
                 external_order_id=row.external_order_id,
+                attempts=row.attempts,
+                last_error=row.last_error,
+            )
+            for row in rows
+        ]
+
+    @router.get("/integration/health", response_model=IntegrationHealthOut)
+    async def integration_health(
+        authorization: str | None = Header(default=None),
+    ) -> IntegrationHealthOut:
+        """M7: integration health, pending/failed order counts -- the
+        portal's "integration health"/"failed and uncertain
+        transactions" view."""
+        _require_credential(authorization)
+        async with session_factory() as session:
+            rows = (await session.execute(select(SupplierOrderRecord))).scalars().all()
+        return IntegrationHealthOut(
+            reconciliation_required_orders=sum(
+                1 for r in rows if r.state == "RECONCILIATION_REQUIRED"
+            ),
+            failed_orders=sum(1 for r in rows if r.state == "FAILED"),
+            confirmed_orders=sum(1 for r in rows if r.state == "CONFIRMED"),
+            total_orders=len(rows),
+        )
+
+    @router.get("/integration/reconciliation", response_model=list[ReconciliationEventOut])
+    async def integration_reconciliation_history(
+        authorization: str | None = Header(default=None),
+    ) -> list[ReconciliationEventOut]:
+        """M7: the portal's "reconciliation history" view -- every
+        attempt (not just the latest), newest first."""
+        _require_credential(authorization)
+        async with session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(SupplierOrderReconciliationEventRecord).order_by(
+                            SupplierOrderReconciliationEventRecord.id.desc()
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        return [
+            ReconciliationEventOut(
+                order_id=row.order_id,
+                negotiation_id=row.negotiation_id,
+                previous_state=row.previous_state,
+                new_state=row.new_state,
+                detail=row.detail,
+                created_at=row.created_at.isoformat(),
             )
             for row in rows
         ]

@@ -31,7 +31,7 @@ from buyer_agent.client import (
     _send_negotiation_artifact,
     discover_supplier_agent_card,
 )
-from buyer_agent.models import BuyerOrderRecord
+from buyer_agent.models import BuyerOrderReconciliationEventRecord, BuyerOrderRecord
 from buyer_agent.settings import BuyerAgentSettings
 
 
@@ -177,15 +177,25 @@ async def _commit(
         # by retrying with this exact row and idempotency_key, never by
         # assuming the commit did or did not happen.
         async with session_factory() as session:
+            order = BuyerOrderRecord(
+                negotiation_id=negotiation_id,
+                content_hash=content_hash,
+                idempotency_key=idempotency_key,
+                state="COMMITTING",
+                attempts=1,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(order)
+            await session.flush()
             session.add(
-                BuyerOrderRecord(
+                BuyerOrderReconciliationEventRecord(
+                    order_id=order.id,
                     negotiation_id=negotiation_id,
-                    content_hash=content_hash,
-                    idempotency_key=idempotency_key,
-                    state="COMMITTING",
-                    attempts=1,
+                    previous_state="NONE",
+                    new_state="COMMITTING",
+                    detail="commit intent persisted before order_commit_request sent",
                     created_at=now,
-                    updated_at=now,
                 )
             )
             await session.commit()
@@ -197,10 +207,21 @@ async def _commit(
         # worker's own backoff/give-up policy.
         async with session_factory() as session:
             record = await session.get(BuyerOrderRecord, existing_order.id)
+            previous_state = record.state
             record.attempts += 1
             record.state = "COMMITTING"
             record.updated_at = now
             await session.merge(record)
+            session.add(
+                BuyerOrderReconciliationEventRecord(
+                    order_id=record.id,
+                    negotiation_id=negotiation_id,
+                    previous_state=previous_state,
+                    new_state="COMMITTING",
+                    detail=f"retry attempt {record.attempts}",
+                    created_at=now,
+                )
+            )
             await session.commit()
 
     commit_request = build_order_commit_request(
@@ -262,13 +283,26 @@ async def _finalize_order(
     state: str,
     external_order_id: str | None,
 ) -> None:
+    now = datetime.now(UTC).replace(tzinfo=None)
     async with session_factory() as session:
         result = await session.execute(
             select(BuyerOrderRecord).where(BuyerOrderRecord.idempotency_key == idempotency_key)
         )
         record = result.scalar_one()
+        previous_state = record.state
         record.state = state
         record.external_order_id = external_order_id
-        record.updated_at = datetime.now(UTC).replace(tzinfo=None)
+        record.updated_at = now
         await session.merge(record)
+        if previous_state != state:
+            session.add(
+                BuyerOrderReconciliationEventRecord(
+                    order_id=record.id,
+                    negotiation_id=record.negotiation_id,
+                    previous_state=previous_state,
+                    new_state=state,
+                    detail=f"order_confirmation received: status={state!r}",
+                    created_at=now,
+                )
+            )
         await session.commit()

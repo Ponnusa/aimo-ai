@@ -1,12 +1,23 @@
-"""supplier-mcp's MCP tool server (M3).
+"""supplier-mcp's MCP tool server (M3; adapter-based as of M7).
 
 Exposes the supplier organization's own business tools over the official
 MCP SDK's Streamable HTTP transport: ``search_catalogue``,
-``check_inventory``, ``get_customer_price`` and ``get_delivery_options``.
-The underlying fictional data lives in
-``food_wholesale.adapters.mock.supplier_tools`` — this module only wires
-it up as typed MCP tools with per-call scoped-credential authorization
-and audit logging.
+``check_inventory``, ``get_customer_price``, ``get_delivery_options``,
+``execute_order`` and ``get_order_status``. As of M7, every tool except
+``search_catalogue``/``check_inventory`` calls the configured
+``SupplierBusinessSystemAdapter`` (see ``supplier_mcp.adapter_factory``)
+rather than importing ``food_wholesale.adapters.mock`` directly, so
+swapping ``SUPPLIER_BUSINESS_SYSTEM_ADAPTER`` (``mock``/``sandbox``/
+``valio_aimo``) changes what's underneath without touching this module's
+tool surface, schemas or database.
+
+``search_catalogue``/``check_inventory`` keep their exact M3-M6 merged
+shape (catalogue search embedding today/tomorrow stock) *only* for the
+default ``mock`` adapter, to avoid changing ``supplier_agent``'s
+existing consumer behavior; the sandbox/Valio adapters report the
+generic, non-merged shape instead (price/forecast-stock fields are
+``None`` — a real ERP's catalogue search would not embed customer-
+specific pricing either).
 
 This is also the fix for the M1-era shortcut in
 ``supplier_agent.a2a_executor``: the fictional catalogue import now lives
@@ -20,7 +31,12 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from food_wholesale.adapters.mock import order_api, supplier_tools
+from business_system_integration import (
+    AdapterAuthenticationError,
+    AdapterError,
+    AdapterUnavailableError,
+)
+from food_wholesale.adapters.mock import supplier_tools
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp_integration import require_tool_scope
@@ -29,6 +45,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from supplier_mcp.adapter_factory import get_adapter
 from supplier_mcp.models import SupplierMcpOrderRecord, SupplierMcpToolInvocationRecord
 from supplier_mcp.settings import SupplierMcpSettings
 
@@ -43,9 +60,13 @@ class CatalogueProductOut(BaseModel):
     product_ref: str
     name: str
     unit: str
-    unit_price: str
-    stock_today: str
-    stock_tomorrow: str
+    #: Only populated for the ``mock`` adapter (M3-M6 merged shape,
+    #: preserved for ``supplier_agent.mcp_client``'s existing fallback
+    #: behavior). ``None`` for sandbox/Valio — a real catalogue search
+    #: would not embed customer-specific price or a stock forecast.
+    unit_price: str | None = None
+    stock_today: str | None = None
+    stock_tomorrow: str | None = None
 
 
 class InventoryOut(BaseModel):
@@ -54,6 +75,10 @@ class InventoryOut(BaseModel):
     unit: str | None = None
     stock_today: str | None = None
     stock_tomorrow: str | None = None
+    #: M7: only populated by a non-mock adapter.
+    moq: str | None = None
+    cutoff_passed: bool = False
+    substituted_for_product_ref: str | None = None
 
 
 class CustomerPriceOut(BaseModel):
@@ -69,13 +94,28 @@ class DeliveryOptionOut(BaseModel):
     earliest_date: str
     fee: str
     currency: str
+    restrictions: list[str] = []
 
 
 class OrderExecutionOut(BaseModel):
     idempotency_key: str
-    external_order_id: str
+    #: ``None`` while ``status == "pending"`` (a delayed-ack business
+    #: system that has not yet issued a reference) -- never fabricated.
+    external_order_id: str | None
     status: str
     duplicate: bool
+
+
+def _adapter_error_to_tool_error(exc: AdapterError) -> ToolError:
+    """Map an adapter failure to the MCP tool-error vocabulary the
+    client (``mcp_integration``) already understands, matching the
+    ``server_auth``/``require_tool_scope`` convention of prefixing
+    authentication failures with ``"Unauthorized:"``."""
+    if isinstance(exc, AdapterAuthenticationError):
+        return ToolError(f"Unauthorized: business system rejected adapter credentials: {exc}")
+    if isinstance(exc, AdapterUnavailableError):
+        return ToolError(f"Business system unavailable: {exc}")
+    return ToolError(str(exc))
 
 
 class OrderStatusOut(BaseModel):
@@ -89,12 +129,13 @@ def create_mcp_server(
     *, settings: SupplierMcpSettings, session_factory: async_sessionmaker
 ) -> FastMCP:
     mcp = FastMCP(name="aimo-brain-supplier-mcp", streamable_http_path="/")
-    #: The "approved mock order adapter" (M5) — one in-process instance
-    #: per server, shared by every execute_order call on this process.
-    #: Durable idempotency/reconciliation authority is the
-    #: ``supplier_mcp_orders`` DB table below, not this object's own
-    #: in-memory dict, so a restart never loses the idempotency guarantee.
-    mock_order_api = order_api.MockOrderApi()
+    #: The configured business-system adapter (M7) — one instance per
+    #: server, shared by every tool call on this process. Durable
+    #: idempotency/reconciliation authority for orders is always the
+    #: ``supplier_mcp_orders`` DB table below, regardless of adapter, so
+    #: a restart never loses the idempotency guarantee even against a
+    #: stateful adapter.
+    adapter = get_adapter(settings)
 
     async def _authorize(ctx: Context, *, tool_name: str, required_scope: str) -> str:
         try:
@@ -126,51 +167,105 @@ def create_mcp_server(
 
     @mcp.tool()
     async def search_catalogue(ctx: Context, query: str) -> list[CatalogueProductOut]:
-        """Search the fictional catalogue by free-text product query."""
+        """Search the configured business system's catalogue by
+        free-text product query."""
         organization_id = await _authorize(
             ctx, tool_name="search_catalogue", required_scope=SUPPLIER_TOOLS_SCOPE
         )
-        matches = supplier_tools.search_catalogue(query)
+        if settings.supplier_business_system_adapter == "mock":
+            # Preserve the exact M3-M6 merged shape (embeds today/
+            # tomorrow stock) for the default adapter -- see module
+            # docstring.
+            mock_matches = supplier_tools.search_catalogue(query)
+            results = [
+                CatalogueProductOut(
+                    product_ref=p.product_ref,
+                    name=p.name,
+                    unit=p.unit,
+                    unit_price=str(p.unit_price),
+                    stock_today=str(p.stock_today),
+                    stock_tomorrow=str(p.stock_tomorrow),
+                )
+                for p in mock_matches
+            ]
+        else:
+            try:
+                summaries = await adapter.search_catalogue(query=query)
+            except AdapterError as exc:
+                await _audit(
+                    tool_name="search_catalogue",
+                    organization_id=organization_id,
+                    success=False,
+                    detail=str(exc),
+                )
+                raise _adapter_error_to_tool_error(exc) from exc
+            results = [
+                CatalogueProductOut(product_ref=s.product_ref, name=s.name, unit=s.unit)
+                for s in summaries
+            ]
         await _audit(
             tool_name="search_catalogue",
             organization_id=organization_id,
             success=True,
-            detail=f"query={query!r} matched={len(matches)}",
+            detail=f"query={query!r} matched={len(results)}",
         )
-        return [
-            CatalogueProductOut(
-                product_ref=p.product_ref,
-                name=p.name,
-                unit=p.unit,
-                unit_price=str(p.unit_price),
-                stock_today=str(p.stock_today),
-                stock_tomorrow=str(p.stock_tomorrow),
-            )
-            for p in matches
-        ]
+        return results
 
     @mcp.tool()
     async def check_inventory(ctx: Context, product_ref: str) -> InventoryOut:
-        """Return the current fictional stock snapshot for ``product_ref``."""
+        """Return the current stock/availability snapshot for
+        ``product_ref`` from the configured business system."""
         organization_id = await _authorize(
             ctx, tool_name="check_inventory", required_scope=SUPPLIER_TOOLS_SCOPE
         )
-        product = supplier_tools.check_inventory(product_ref)
+        if settings.supplier_business_system_adapter == "mock":
+            product = supplier_tools.check_inventory(product_ref)
+            found = product is not None
+            result = (
+                InventoryOut(found=False, product_ref=product_ref)
+                if product is None
+                else InventoryOut(
+                    found=True,
+                    product_ref=product.product_ref,
+                    unit=product.unit,
+                    stock_today=str(product.stock_today),
+                    stock_tomorrow=str(product.stock_tomorrow),
+                )
+            )
+        else:
+            try:
+                availability = await adapter.check_availability(
+                    product_ref=product_ref, quantity="0"
+                )
+            except AdapterError as exc:
+                await _audit(
+                    tool_name="check_inventory",
+                    organization_id=organization_id,
+                    success=False,
+                    detail=str(exc),
+                )
+                raise _adapter_error_to_tool_error(exc) from exc
+            found = availability is not None
+            result = (
+                InventoryOut(found=False, product_ref=product_ref)
+                if availability is None
+                else InventoryOut(
+                    found=True,
+                    product_ref=product_ref,
+                    stock_today=availability.quantity_available,
+                    stock_tomorrow=availability.quantity_available,
+                    moq=availability.moq,
+                    cutoff_passed=availability.cutoff_passed,
+                    substituted_for_product_ref=availability.substituted_for_product_ref,
+                )
+            )
         await _audit(
             tool_name="check_inventory",
             organization_id=organization_id,
             success=True,
-            detail=f"product_ref={product_ref!r} found={product is not None}",
+            detail=f"product_ref={product_ref!r} found={found}",
         )
-        if product is None:
-            return InventoryOut(found=False, product_ref=product_ref)
-        return InventoryOut(
-            found=True,
-            product_ref=product.product_ref,
-            unit=product.unit,
-            stock_today=str(product.stock_today),
-            stock_tomorrow=str(product.stock_tomorrow),
-        )
+        return result
 
     @mcp.tool()
     async def get_customer_price(
@@ -180,9 +275,18 @@ def create_mcp_server(
         organization_id = await _authorize(
             ctx, tool_name="get_customer_price", required_scope=SUPPLIER_TOOLS_SCOPE
         )
-        price = supplier_tools.get_customer_price(
-            product_ref=product_ref, buyer_organization_id=buyer_organization_id
-        )
+        try:
+            price = await adapter.get_customer_price(
+                product_ref=product_ref, buyer_organization_id=buyer_organization_id
+            )
+        except AdapterError as exc:
+            await _audit(
+                tool_name="get_customer_price",
+                organization_id=organization_id,
+                success=False,
+                detail=str(exc),
+            )
+            raise _adapter_error_to_tool_error(exc) from exc
         await _audit(
             tool_name="get_customer_price",
             organization_id=organization_id,
@@ -212,7 +316,16 @@ def create_mcp_server(
         organization_id = await _authorize(
             ctx, tool_name="get_delivery_options", required_scope=SUPPLIER_TOOLS_SCOPE
         )
-        options = supplier_tools.get_delivery_options(product_ref=product_ref, quantity=quantity)
+        try:
+            options = await adapter.get_delivery_options(product_ref=product_ref, quantity=quantity)
+        except AdapterError as exc:
+            await _audit(
+                tool_name="get_delivery_options",
+                organization_id=organization_id,
+                success=False,
+                detail=str(exc),
+            )
+            raise _adapter_error_to_tool_error(exc) from exc
         await _audit(
             tool_name="get_delivery_options",
             organization_id=organization_id,
@@ -221,7 +334,11 @@ def create_mcp_server(
         )
         return [
             DeliveryOptionOut(
-                label=o.label, earliest_date=o.earliest_date, fee=str(o.fee), currency=o.currency
+                label=o.label,
+                earliest_date=o.earliest_date,
+                fee=o.fee,
+                currency=o.currency,
+                restrictions=list(o.restrictions),
             )
             for o in options
         ]
@@ -233,15 +350,19 @@ def create_mcp_server(
         agreement_id: str,
         content_hash: str,
         buyer_organization_id: str,
+        lines: list[dict[str, str]] | None = None,
     ) -> OrderExecutionOut:
-        """The approved mock order-execution tool (M5). Requires the
-        narrow ``execute_order`` scope — a read-only
+        """The approved order-execution tool (M5; adapter-based as of
+        M7). Requires the narrow ``execute_order`` scope — a read-only
         ``use_supplier_tools`` credential cannot call this. Idempotent:
         the same ``idempotency_key`` always returns the exact same
-        ``external_order_id`` rather than creating a second order,
-        enforced by this table's own UNIQUE constraint, not merely by
-        checking first (a concurrent duplicate call can race the check,
-        never the constraint)."""
+        result rather than creating a second order, enforced by this
+        table's own UNIQUE constraint (the durable idempotency
+        authority, independent of whatever the configured adapter does
+        underneath) — not merely by checking first, since a concurrent
+        duplicate call can race the check, never the constraint.
+        ``status`` may be ``"pending"`` (a delayed-ack business system)
+        -- never treated as failure by any caller."""
         organization_id = await _authorize(
             ctx, tool_name="execute_order", required_scope=EXECUTE_ORDER_SCOPE
         )
@@ -267,7 +388,37 @@ def create_mcp_server(
                     duplicate=True,
                 )
 
-            confirmation = mock_order_api.submit_order(idempotency_key=idempotency_key)
+            try:
+                result = await adapter.submit_order(
+                    idempotency_key=idempotency_key,
+                    buyer_organization_id=buyer_organization_id,
+                    lines=lines or [],
+                )
+            except AdapterAuthenticationError as exc:
+                # Never left ambiguous: a credential rejection is a
+                # configuration/authorization failure, not a transient
+                # condition -- fail closed immediately, no order row.
+                await _audit(
+                    tool_name="execute_order",
+                    organization_id=organization_id,
+                    success=False,
+                    detail=str(exc),
+                )
+                raise _adapter_error_to_tool_error(exc) from exc
+            except AdapterError as exc:
+                # Unavailable/malformed: genuinely unknown outcome --
+                # surfaced as a tool error so supplier_agent.commitment
+                # marks RECONCILIATION_REQUIRED, never FAILED, and the
+                # worker retries later. No row is written here because
+                # we never learned an external_order_id to record.
+                await _audit(
+                    tool_name="execute_order",
+                    organization_id=organization_id,
+                    success=False,
+                    detail=str(exc),
+                )
+                raise _adapter_error_to_tool_error(exc) from exc
+
             try:
                 session.add(
                     SupplierMcpOrderRecord(
@@ -275,8 +426,8 @@ def create_mcp_server(
                         agreement_id=agreement_id,
                         buyer_organization_id=buyer_organization_id,
                         content_hash=content_hash,
-                        external_order_id=confirmation.external_order_id,
-                        status=confirmation.status,
+                        external_order_id=result.external_order_id,
+                        status=result.status,
                         created_at=datetime.now(UTC).replace(tzinfo=None),
                     )
                 )
@@ -310,18 +461,21 @@ def create_mcp_server(
             tool_name="execute_order",
             organization_id=organization_id,
             success=True,
-            detail=f"idempotency_key={idempotency_key!r} order={confirmation.external_order_id!r}",
+            detail=f"idempotency_key={idempotency_key!r} order={result.external_order_id!r}",
         )
         return OrderExecutionOut(
             idempotency_key=idempotency_key,
-            external_order_id=confirmation.external_order_id,
-            status=confirmation.status,
+            external_order_id=result.external_order_id,
+            status=result.status,
             duplicate=False,
         )
 
     @mcp.tool()
     async def get_order_status(ctx: Context, idempotency_key: str) -> OrderStatusOut:
-        """Order-status lookup for reconciliation (M5): the same narrow
+        """Order-status lookup for reconciliation (M5; M7: also
+        reconciles a locally-pending row against the configured adapter
+        before answering, so a resolved delayed-ack order is reflected
+        here without a separate sync step): the same narrow
         ``execute_order`` scope as the execution tool itself."""
         organization_id = await _authorize(
             ctx, tool_name="get_order_status", required_scope=EXECUTE_ORDER_SCOPE
@@ -334,6 +488,16 @@ def create_mcp_server(
                     )
                 )
             ).scalar_one_or_none()
+            if record is not None and record.status == "pending":
+                try:
+                    remote = await adapter.get_order_status(idempotency_key=idempotency_key)
+                except AdapterError:
+                    remote = None
+                if remote is not None and remote.found and remote.status != "pending":
+                    record.status = "confirmed" if remote.status == "confirmed" else remote.status
+                    if remote.external_order_id:
+                        record.external_order_id = remote.external_order_id
+                    await session.commit()
         await _audit(
             tool_name="get_order_status",
             organization_id=organization_id,

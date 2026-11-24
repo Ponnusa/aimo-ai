@@ -11,6 +11,7 @@ the two together and builds/validates the wire artifacts.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -26,9 +27,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from supplier_agent import authorization, mcp_client, negotiation_store
-from supplier_agent.models import SupplierOrderRecord
+from supplier_agent.models import (
+    SupplierOrderReconciliationEventRecord,
+    SupplierOrderRecord,
+    SupplierProposalRecord,
+)
 from supplier_agent.negotiation_store import NegotiationNotFoundError
 from supplier_agent.settings import SupplierAgentSettings
+
+#: States apps/worker's supplier role will retry reconciling. "FAILED"/
+#: "CONFIRMED" are terminal.
+RETRYABLE_SUPPLIER_ORDER_STATES: tuple[str, ...] = ("RECONCILIATION_REQUIRED",)
 
 
 class CommitmentError(Exception):
@@ -161,6 +170,8 @@ async def handle_order_commit_request(
             f"content_hash {content_hash_value!r}."
         )
 
+    lines = await _load_current_proposal_lines(session_factory, negotiation_id=negotiation_id)
+
     try:
         execution = await mcp_client.execute_order(
             settings=settings,
@@ -168,10 +179,22 @@ async def handle_order_commit_request(
             agreement_id=negotiation_id,
             content_hash=content_hash_value,
             buyer_organization_id=negotiation.counterparty_organization_id,
+            lines=lines,
         )
-        status = "CONFIRMED" if execution.status == "confirmed" else "FAILED"
+        if execution.status == "confirmed":
+            status = "CONFIRMED"
+        elif execution.status == "pending":
+            # The business system accepted the order but has not yet
+            # acknowledged it (a delayed-ack system) -- never treated as
+            # a failure. apps/worker's supplier role reconciles this.
+            status = "RECONCILIATION_REQUIRED"
+        else:
+            status = "FAILED"
         external_order_id: str | None = execution.external_order_id
     except McpToolError:
+        # Unreachable/timed-out business system is explicitly not proof
+        # of failure (docs/SECURITY.md) -- left for the worker to
+        # reconcile, never marked FAILED here.
         status = "RECONCILIATION_REQUIRED"
         external_order_id = None
 
@@ -200,6 +223,29 @@ async def handle_order_commit_request(
     )
 
 
+async def _load_current_proposal_lines(
+    session_factory: async_sessionmaker, *, negotiation_id: str
+) -> list[dict[str, str]]:
+    """Best-effort: the agreed proposal's line items, passed through to
+    the business-system adapter (so a realistic adapter can decrement
+    its own stock). Never raises -- an adapter that doesn't need lines
+    (the mock adapter) works identically with an empty list, and a
+    missing/malformed proposal record must never block a commit whose
+    authorization has already been independently verified."""
+    negotiation = await negotiation_store.get_negotiation(session_factory, negotiation_id)
+    if negotiation is None:
+        return []
+    async with session_factory() as session:
+        proposal = await session.get(SupplierProposalRecord, negotiation.current_proposal_id)
+    if proposal is None:
+        return []
+    try:
+        payload = json.loads(proposal.payload_json)
+        return list(payload["payload"]["lines"])
+    except (KeyError, TypeError, ValueError):
+        return []
+
+
 async def _record_order(
     session_factory: async_sessionmaker,
     *,
@@ -208,6 +254,7 @@ async def _record_order(
     idempotency_key: str,
     status: str,
     external_order_id: str | None,
+    detail: str = "",
 ) -> None:
     now = datetime.now(UTC).replace(tzinfo=None)
     async with session_factory() as session:
@@ -219,20 +266,110 @@ async def _record_order(
             )
         ).scalar_one_or_none()
         if existing is not None:
-            existing.status = status
+            previous_state = existing.state
+            existing.state = status
             existing.external_order_id = external_order_id
+            existing.attempts += 1
+            existing.last_error = detail or None
             existing.updated_at = now
-            await session.merge(existing)
+            if previous_state != status:
+                session.add(
+                    SupplierOrderReconciliationEventRecord(
+                        order_id=existing.id,
+                        negotiation_id=negotiation_id,
+                        previous_state=previous_state,
+                        new_state=status,
+                        detail=detail or f"transitioned to {status}",
+                        created_at=now,
+                    )
+                )
         else:
+            order = SupplierOrderRecord(
+                negotiation_id=negotiation_id,
+                content_hash=content_hash,
+                idempotency_key=idempotency_key,
+                state=status,
+                external_order_id=external_order_id,
+                attempts=1,
+                last_error=detail or None,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(order)
+            await session.flush()
             session.add(
-                SupplierOrderRecord(
+                SupplierOrderReconciliationEventRecord(
+                    order_id=order.id,
                     negotiation_id=negotiation_id,
-                    content_hash=content_hash,
-                    idempotency_key=idempotency_key,
-                    state=status,
-                    external_order_id=external_order_id,
+                    previous_state="NONE",
+                    new_state=status,
+                    detail=detail or f"created at {status}",
                     created_at=now,
-                    updated_at=now,
                 )
             )
         await session.commit()
+
+
+async def reconcile_pending_order(
+    order_id: int,
+    *,
+    settings: SupplierAgentSettings,
+    session_factory: async_sessionmaker,
+) -> str:
+    """Re-check a ``RECONCILIATION_REQUIRED`` order against supplier-mcp
+    (M7). Idempotent and safe to call repeatedly: it only ever re-reads
+    durable state and re-asks the business system, never re-submits the
+    order (the same ``idempotency_key`` is used throughout, and
+    supplier-mcp's own ``supplier_mcp_orders`` UNIQUE constraint remains
+    the actual duplicate-submission guard regardless of how many times
+    this runs). Returns the row's state after reconciling."""
+    async with session_factory() as session:
+        order = await session.get(SupplierOrderRecord, order_id)
+    if order is None:
+        raise CommitmentError(f"Unknown supplier order id={order_id!r}.")
+    if order.state not in RETRYABLE_SUPPLIER_ORDER_STATES:
+        return order.state
+
+    try:
+        remote = await mcp_client.get_order_status(
+            settings=settings, idempotency_key=order.idempotency_key
+        )
+    except McpToolError as exc:
+        await _record_order(
+            session_factory,
+            negotiation_id=order.negotiation_id,
+            content_hash=order.content_hash,
+            idempotency_key=order.idempotency_key,
+            status="RECONCILIATION_REQUIRED",
+            external_order_id=order.external_order_id,
+            detail=f"reconciliation attempt failed: {exc}",
+        )
+        return "RECONCILIATION_REQUIRED"
+
+    remote_status = remote.get("status")
+    if not remote.get("found") or remote_status in (None, "pending"):
+        # Still unresolved -- bump the attempt count/history without
+        # changing state, so the worker's backoff/max_attempts bound
+        # still applies.
+        await _record_order(
+            session_factory,
+            negotiation_id=order.negotiation_id,
+            content_hash=order.content_hash,
+            idempotency_key=order.idempotency_key,
+            status="RECONCILIATION_REQUIRED",
+            external_order_id=order.external_order_id,
+            detail="business system still reports pending/unresolved",
+        )
+        return "RECONCILIATION_REQUIRED"
+
+    resolved_status = "CONFIRMED" if remote_status == "confirmed" else "FAILED"
+    await _record_order(
+        session_factory,
+        negotiation_id=order.negotiation_id,
+        content_hash=order.content_hash,
+        idempotency_key=order.idempotency_key,
+        status=resolved_status,
+        external_order_id=remote.get("external_order_id") or order.external_order_id,
+        detail=f"reconciled via get_order_status: {remote_status!r}",
+    )
+    return resolved_status

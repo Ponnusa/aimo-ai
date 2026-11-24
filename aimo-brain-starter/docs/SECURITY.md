@@ -263,3 +263,96 @@ already uses.
     the same approver deciding twice is rejected.
 24. A non-admin session cannot activate a policy version pointer or
     reach any endpoint gated on the portal's admin-confirmed credential.
+
+## M7: supplier business-system adapter trust model and residual limitations
+
+**The adapter boundary is internal, authenticated, and never a new
+trust root.** `apps/supplier-mcp`'s tool implementations call a
+configured `business_system_integration.SupplierBusinessSystemAdapter`
+instead of importing fictional mock functions directly, but nothing
+about *who* is allowed to call `supplier-mcp`'s own tools changes: the
+existing `use_supplier_tools`/`execute_order` scope split (M5) is
+unchanged, and callers (`supplier_agent`) never see which adapter is
+configured. The adapter's own call to the business system it wraps
+(e.g. `apps/supplier-sandbox-erp`) is authenticated the same way every
+other intra-organization service call in this codebase already is: a
+network-api-minted, narrowly-scoped (`use_sandbox_erp`) HMAC service
+credential, never a new cross-organization trust mechanism and never a
+credential an agent process holds directly.
+
+**Adapter failures are explicitly typed and never silently trusted.**
+`AdapterUnavailableError` (unreachable/timeout) is mapped to
+`RECONCILIATION_REQUIRED`, never `FAILED` — the same "timeout is not
+proof of failure" rule M5.1 established for the buyer's own commit path
+now holds at the adapter boundary too. `AdapterAuthenticationError`
+fails closed immediately: no order row is left ambiguous, no retry is
+attempted, because a rejected credential is a configuration/authorization
+problem, not a transient condition. `AdapterMalformedResponseError`
+(a response that doesn't fit the expected shape) is raised rather than
+guessing at missing fields — proven directly against a deliberately
+rogue HTTP server returning non-JSON, not only against a hypothetical.
+
+**Idempotency remains layered exactly as M5/ADR-011 established.**
+`supplier-mcp`'s own `supplier_mcp_orders` table (UNIQUE
+`idempotency_key`) is still the actual durable idempotency authority,
+checked *before* the adapter is ever called — the adapter's own
+behavior underneath (even a genuinely different idempotency scheme, or
+none at all) cannot cause a duplicate order to be recorded on AIMO's
+side. `apps/supplier-sandbox-erp` additionally enforces its own
+UNIQUE-constrained idempotency, proving the pattern holds one layer
+further out, against a genuinely separate system/database — but this is
+a defense-in-depth property of the sandbox, not something AIMO BRAIN
+depends on a real supplier system to provide.
+
+**Supplier-side reconciliation is real, not a documented gap.**
+`apps/worker`'s supplier role (previously a no-op, per M5.1/ADR-012)
+now retries `supplier_orders` rows stuck in `RECONCILIATION_REQUIRED`
+past backoff, bounded by the same durable per-row attempt count as the
+buyer role, by re-invoking
+`supplier_agent.commitment.reconcile_pending_order` — which only ever
+re-asks the adapter's order-status lookup, never re-submits an order.
+Every reconciliation attempt (not just the latest) is recorded in a new
+`supplier_order_reconciliation_events`/`buyer_order_reconciliation_events`
+table, surfaced through the portal's integration-health view.
+
+**Residual limitation: the sandbox ERP's failure modes are illustrative,
+not representative of any real supplier system, let alone Valio Aimo
+specifically.** `apps/supplier-sandbox-erp`'s transient-error/timeout/
+delayed-acknowledgement behavior is deterministic and test-controlled
+(an environment-gated `/admin/fault-injection` surface, refused outside
+local/staging/test, mirroring `identity.dev_oidc`'s own gating) — it
+proves AIMO BRAIN's commit/reconciliation path handles *a* realistic
+set of ERP failure shapes correctly, not that it has been validated
+against Valio Aimo's actual behavior, which remains unknown until
+sandbox access is granted (see
+`docs/integrations/valio-aimo-adapter-contract.md`).
+
+**Residual limitation: the Valio Aimo adapter is unimplemented by
+design, not merely incomplete.** `food_wholesale.adapters.valio_aimo.ValioAimoAdapter`
+raises `NotImplementedError` on every method; a static architectural
+test (`tests/contracts/test_database_isolation.py`) asserts it imports
+no HTTP client at all, so it cannot regress into a real network call
+without that test failing first. No Valio Aimo credential, endpoint or
+production access exists anywhere in this codebase, per `CLAUDE.md`.
+
+25. An adapter authentication failure (wrong organization, wrong scope,
+    or an unregistered credential entirely) is rejected before any
+    catalogue/price/order call succeeds, and never leaves a supplier
+    order row in an ambiguous state.
+26. A malformed response from the configured business system (invalid
+    JSON, a response missing required fields) is rejected as
+    `AdapterMalformedResponseError`, never partially trusted into a
+    half-populated result.
+27. A business-system timeout or transient unavailability during
+    `execute_order` resolves to `RECONCILIATION_REQUIRED`, never
+    `FAILED` — proven against a deliberately armed one-shot transient
+    fault on the real sandbox ERP server, not merely asserted.
+28. A delayed-acknowledgement ("pending") order is never reported as
+    `"confirmed"` until the business system actually resolves it, and a
+    duplicate submission with the same idempotency key during the
+    pending window returns the original result rather than creating a
+    second order.
+29. `WORKER_ROLE=supplier` recovers a `RECONCILIATION_REQUIRED` order to
+    its true resolved state (`CONFIRMED`/`FAILED`) without re-submitting
+    it, and a second reconciliation cycle against an already-resolved
+    order is a no-op.

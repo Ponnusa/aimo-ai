@@ -141,8 +141,30 @@ class SupplierOrderRecord(Base):
     idempotency_key: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     state: Mapped[str] = mapped_column(String, nullable=False)
     external_order_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    #: M7: mirrors buyer_orders' attempts/last_error -- lets
+    #: apps/worker's supplier role bound its retries the same way the
+    #: buyer role always has.
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class SupplierOrderReconciliationEventRecord(Base):
+    """One row per reconciliation attempt against a ``supplier_orders``
+    row (M7) -- unlike ``attempts`` (a counter), this is a durable
+    history list, surfaced through ``/management/integration/
+    reconciliation`` for the portal's "reconciliation history" view."""
+
+    __tablename__ = "supplier_order_reconciliation_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    negotiation_id: Mapped[str] = mapped_column(String, nullable=False)
+    previous_state: Mapped[str] = mapped_column(String, nullable=False)
+    new_state: Mapped[str] = mapped_column(String, nullable=False)
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
 class SupplierSeenMessageProofRecord(Base):

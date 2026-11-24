@@ -48,6 +48,10 @@ class SupplierMcpOrderRecord(Base):
     agreement_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     buyer_organization_id: Mapped[str] = mapped_column(String, nullable=False)
     content_hash: Mapped[str] = mapped_column(String, nullable=False)
-    external_order_id: Mapped[str] = mapped_column(String, nullable=False)
+    #: Nullable as of M7: a delayed-ack adapter (sandbox/Valio) can
+    #: report ``status="pending"`` with no reference yet -- never
+    #: fabricated. ``get_order_status`` fills this in once the adapter
+    #: resolves the order.
+    external_order_id: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

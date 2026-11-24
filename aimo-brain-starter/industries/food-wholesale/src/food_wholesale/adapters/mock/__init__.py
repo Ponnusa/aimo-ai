@@ -1,3 +1,4 @@
+from food_wholesale.adapters.mock.adapter import MockSupplierAdapter
 from food_wholesale.adapters.mock.buyer_tools import (
     ApprovedSupplier,
     Budget,
@@ -31,6 +32,7 @@ __all__ = [
     "DeliveryOption",
     "MockOrderApi",
     "MockProduct",
+    "MockSupplierAdapter",
     "OrderConfirmation",
     "PurchaseApprovalDecision",
     "PurchaseRequirement",

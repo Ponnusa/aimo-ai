@@ -33,10 +33,14 @@ async def execute_order(
     agreement_id: str,
     content_hash: str,
     buyer_organization_id: str,
+    lines: list[dict[str, str]] | None = None,
 ) -> OrderExecutionResult:
     """Call supplier-mcp's narrow ``execute_order`` tool (M5) with the
     separate execution credential — never the read-only
-    ``use_supplier_tools`` one. Propagates
+    ``use_supplier_tools`` one. ``lines`` (M7) is passed through to
+    whichever business-system adapter supplier-mcp is configured with —
+    the mock adapter ignores it, a realistic one (sandbox/Valio) may use
+    it (e.g. to decrement its own stock). Propagates
     :class:`mcp_integration.McpToolError` on any failure; callers decide
     how to turn that into ``FAILED``/``RECONCILIATION_REQUIRED``."""
     result = await call_tool(
@@ -48,6 +52,7 @@ async def execute_order(
             "agreement_id": agreement_id,
             "content_hash": content_hash,
             "buyer_organization_id": buyer_organization_id,
+            "lines": lines or [],
         },
     )
     try:
