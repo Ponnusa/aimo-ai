@@ -535,6 +535,9 @@ def create_app() -> FastAPI:
                 try:
                     await session.commit()
                 except IntegrityError as exc:
+                    import sys as _sys
+
+                    print(f"[DIAG] IntegrityError on insert: {exc!r}", file=_sys.stderr)
                     # Atomicity (ADR-015 section C): two concurrent
                     # first-time registrations for the same brand-new
                     # agent_id race on the primary key. Only one can win;
