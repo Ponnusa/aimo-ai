@@ -29,25 +29,12 @@ def _fake_card(
 
 
 async def _fresh_app(monkeypatch, *, fake_card=None):
-    import sys
-
     get_settings.cache_clear()
     settings = get_settings()
     engine = new_engine(settings.registry_database_url)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
-        from sqlalchemy import text as _text
-
-        try:
-            count = (await conn.execute(_text("SELECT COUNT(*) FROM registry_agents"))).scalar_one()
-            print(
-                f"[DIAG] url={settings.registry_database_url!r} "
-                f"registry_agents rowcount after create_all={count}",
-                file=sys.stderr,
-            )
-        except Exception as diag_exc:  # noqa: BLE001
-            print(f"[DIAG] rowcount probe failed: {diag_exc!r}", file=sys.stderr)
 
     if fake_card is not None:
         import registry_api.app as app_module

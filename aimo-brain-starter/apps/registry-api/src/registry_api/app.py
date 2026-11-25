@@ -408,17 +408,6 @@ def create_app() -> FastAPI:
                 )
 
             existing = await session.get(RegistryAgentRecord, body.agent_id)
-            if existing is not None:
-                import sys as _sys
-
-                print(
-                    f"[DIAG] unexpected existing row for agent_id={body.agent_id!r}: "
-                    f"org={existing.organization_id!r} status={existing.status!r} "
-                    f"classification={existing.agent_classification!r} "
-                    f"has_key={existing.signing_public_key_jwk is not None} "
-                    f"registered_at={existing.registered_at!r}",
-                    file=_sys.stderr,
-                )
             if existing is not None and existing.organization_id != body.organization_id:
                 raise HTTPException(
                     status_code=409,
@@ -519,6 +508,18 @@ def create_app() -> FastAPI:
                     signing_public_key_jwk=new_key_encoded,
                 )
                 session.add(record)
+                # Flush the parent row before adding its children: there is
+                # no ORM relationship() between RegistryAgentRecord and
+                # RegistryAgentCapabilityRecord (only a schema-level
+                # ForeignKey column), so the unit-of-work's flush-ordering
+                # pass has no dependency edge to sort these two inserts by.
+                # SQLite's test database never enforces foreign keys by
+                # default, so a wrong order was silently tolerated there;
+                # Postgres does enforce them, and raised exactly the
+                # ForeignKeyViolation this flush prevents. Found via a real
+                # Postgres CI run (local verification only ever used
+                # SQLite) -- not introduced by M8, but blocking it.
+                await session.flush()
                 for skill in card.skills:
                     session.add(
                         RegistryAgentCapabilityRecord(
@@ -535,9 +536,6 @@ def create_app() -> FastAPI:
                 try:
                     await session.commit()
                 except IntegrityError as exc:
-                    import sys as _sys
-
-                    print(f"[DIAG] IntegrityError on insert: {exc!r}", file=_sys.stderr)
                     # Atomicity (ADR-015 section C): two concurrent
                     # first-time registrations for the same brand-new
                     # agent_id race on the primary key. Only one can win;
