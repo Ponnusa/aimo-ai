@@ -1,0 +1,9 @@
+{
+  "name": "aimo-brain-jws-cross-lang-harness",
+  "private": true,
+  "type": "module",
+  "description": "Minimal Node.js/TypeScript-free conformance harness proving Python <-> Node.js interoperability for docs/specs/jws-artifact-signatures.md. No AIMO Python package dependency. No npm dependencies -- Node.js built-ins only.",
+  "scripts": {
+    "test": "node verify-vectors.mjs && node generate-artifact.mjs"
+  }
+}

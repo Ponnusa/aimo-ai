@@ -1,0 +1,33 @@
+{
+  "description": "The same proof from vector_01, but the artifact's payload was modified after signing (an 'injected' line item replacing the original one). A conformant verifier MUST reject this: the signature cryptographically verifies (it's a well-formed JWS over the original content) but the recomputed artifact digest no longer matches the signed artifact_digest claim.",
+  "case": "verify_failure",
+  "expected_failure_reason": "artifact_digest_mismatch",
+  "kid": "org_vector_buyer_01-k1",
+  "signer_organization_id": "org_vector_buyer_01",
+  "public_key_jwk": {
+    "kty": "OKP",
+    "crv": "Ed25519",
+    "kid": "org_vector_buyer_01-k1",
+    "x": "cAjigfymr9H5d-4FsRmA3fY77P4yU6rGOmSN9l8UEfg",
+    "use": "sig",
+    "alg": "EdDSA"
+  },
+  "expected_recipient_organization_id": "org_vector_supplier_01",
+  "signed_artifact": {
+    "artifact_id": "art_vector_01",
+    "transaction_id": "txn_vector_01",
+    "correlation_id": "corr_vector_01",
+    "sender_agent_id": "agent_vector_buyer_01",
+    "recipient_agent_id": "agent_vector_supplier_01",
+    "organization_id": "org_vector_buyer_01",
+    "type": "request_for_quote",
+    "version": 1,
+    "payload": {"lines": [{"product_ref": "injected", "quantity": "999"}]},
+    "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85",
+    "proof": {
+      "alg": "EdDSA",
+      "kid": "org_vector_buyer_01-k1",
+      "jws": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZ192ZWN0b3JfYnV5ZXJfMDEtazEiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJvcmdfdmVjdG9yX2J1eWVyXzAxIiwic3ViIjoiYWdlbnRfdmVjdG9yX2J1eWVyXzAxIiwiYXVkIjoib3JnX3ZlY3Rvcl9zdXBwbGllcl8wMSIsIm5lZyI6InR4bl92ZWN0b3JfMDEiLCJ0eXAiOiJyZXF1ZXN0X2Zvcl9xdW90ZSIsInZlciI6MSwiaGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NSIsImFydGlmYWN0X2RpZ2VzdCI6IjY5Zjg4OGE0Nzk4YzkwOTE0MmNlYjkxNGQ4M2YzZjg4MTNkNjBhNTQ4NWRmY2Q5Nzc0ZWZmMjYwZjViNGI0ZGUiLCJqdGkiOiJqdGlfdmVjdG9yX2ZpeGVkXzAxIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjQwMDAwMDAwMDB9.IR9_aXUAH2rC0FP8iVl2swh9A2aZiYxsdL_ncP3MbIqnadHs5n5XTp1kCgoZ2cqpbLo_wch86WbcbS7DwJNXCg"
+    }
+  }
+}

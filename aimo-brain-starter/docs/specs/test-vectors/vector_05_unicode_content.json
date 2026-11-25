@@ -1,0 +1,42 @@
+{
+  "description": "A correctly signed request_for_quote artifact whose payload contains non-ASCII (Unicode) text, demonstrating the ensure_ascii escaping rule in spec section 2d. An implementation that verifies this against the given public key, with expected_recipient_organization_id='org_vector_supplier_01', must ACCEPT it. iat/exp are far-future so this vector never expires, matching vectors 01-04.",
+  "case": "verify_success",
+  "kid": "org_vector_buyer_01-k1",
+  "signer_organization_id": "org_vector_buyer_01",
+  "public_key_jwk": {
+    "kty": "OKP",
+    "crv": "Ed25519",
+    "kid": "org_vector_buyer_01-k1",
+    "x": "4W9OcXZlfI6tuMDl-YwrHIdPJ059x09dYEMQb3CvmXw",
+    "use": "sig",
+    "alg": "EdDSA"
+  },
+  "expected_recipient_organization_id": "org_vector_supplier_01",
+  "signed_artifact": {
+    "artifact_id": "art_vector_05",
+    "transaction_id": "txn_vector_05",
+    "correlation_id": "corr_vector_05",
+    "sender_agent_id": "agent_vector_buyer_01",
+    "recipient_agent_id": "agent_vector_supplier_01",
+    "organization_id": "org_vector_buyer_01",
+    "type": "request_for_quote",
+    "version": 1,
+    "payload": {
+      "lines": [
+        {
+          "product_ref": "sku_0001",
+          "quantity": "10",
+          "note": "P\u00f6yt\u00e4 ja tuoli \u2014 caf\u00e9 cr\u00e8me, \u65e5\u672c\u8a9e"
+        }
+      ]
+    },
+    "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85",
+    "proof": {
+      "alg": "EdDSA",
+      "kid": "org_vector_buyer_01-k1",
+      "jws": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZ192ZWN0b3JfYnV5ZXJfMDEtazEiLCJ0eXAiOiJKV1QifQ.eyJpc3MiOiJvcmdfdmVjdG9yX2J1eWVyXzAxIiwic3ViIjoiYWdlbnRfdmVjdG9yX2J1eWVyXzAxIiwiYXVkIjoib3JnX3ZlY3Rvcl9zdXBwbGllcl8wMSIsIm5lZyI6InR4bl92ZWN0b3JfMDUiLCJ0eXAiOiJyZXF1ZXN0X2Zvcl9xdW90ZSIsInZlciI6MSwiaGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NSIsImFydGlmYWN0X2RpZ2VzdCI6IjE0ODE5ZTI1MzFjZmU4OTI4ZjhiNTFlMmJlZDk0NGFhMTI3MzhiNDNiNzQ5MjU2ODg2YzE3YmQ3OGU5MGE5NzMiLCJqdGkiOiIzNWJlNDRlMS04YWM2LTQ3ZTgtYjA4MC05ODAyYzFjOTRhMDIiLCJpYXQiOjE3OTU2MTIzMTEsImV4cCI6Mzc5NTYxMjMxMX0.dkst0dbZfrZTYk_rex0r5-P8LGSbYLvUutlHDi2bf3RQvOK09tNMSMdSEwi8ljUUSqTzOfiCLQPizwKQMqh1AA"
+    }
+  },
+  "expected_artifact_digest": "14819e2531cfe8928f8b51e2bed944aa12738b43b749256886c17bd78e90a973",
+  "expected_canonicalized_artifact_without_proof": "{\"artifact_id\":\"art_vector_05\",\"content_hash\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85\",\"correlation_id\":\"corr_vector_05\",\"organization_id\":\"org_vector_buyer_01\",\"payload\":{\"lines\":[{\"note\":\"P\\u00f6yt\\u00e4 ja tuoli \\u2014 caf\\u00e9 cr\\u00e8me, \\u65e5\\u672c\\u8a9e\",\"product_ref\":\"sku_0001\",\"quantity\":\"10\"}]},\"recipient_agent_id\":\"agent_vector_supplier_01\",\"sender_agent_id\":\"agent_vector_buyer_01\",\"transaction_id\":\"txn_vector_05\",\"type\":\"request_for_quote\",\"version\":1}"
+}

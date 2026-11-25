@@ -77,6 +77,7 @@ def _build_registry_app(*, database_url: str, network_api_url: str):
         RegistryAgentCapabilityRecord,
         RegistryAgentRecord,
         RegistryAuditEventRecord,
+        RegistryOrganizationPolicyRecord,
     )
 
     os.environ["REGISTRY_DATABASE_URL"] = database_url
@@ -91,6 +92,7 @@ def _build_registry_app(*, database_url: str, network_api_url: str):
         RegistryAgentRecord,
         RegistryAgentCapabilityRecord,
         RegistryAuditEventRecord,
+        RegistryOrganizationPolicyRecord,
     )
 
 
@@ -294,7 +296,7 @@ async def _register_and_verify_supplier(*, registry_server, supplier_server, tok
             headers={"Authorization": f"Bearer {token}"},
         )
         assert start.status_code == 200, start.text
-        challenge = start.json()["challenge"]
+        challenge = start.json()["endpoint_challenge"]
 
         put_response = await client.put(
             f"{supplier_server.base_url}/internal/ownership-challenge",

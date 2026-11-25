@@ -30,9 +30,15 @@ class NegotiationTransitionError(Exception):
 
 def canonicalize_terms(terms: dict[str, Any]) -> str:
     """Deterministic JSON serialization: sorted keys, no incidental
-    whitespace. The same logical terms always produce the same string,
-    regardless of which organization's code constructed the dict."""
-    return json.dumps(terms, sort_keys=True, separators=(",", ":"))
+    whitespace, standard-JSON-only numbers. The same logical terms always
+    produce the same string, regardless of which organization's code
+    constructed the dict. Kept byte-for-byte identical to
+    ``message_integrity.proofs.canonicalize`` -- including the M8
+    ``allow_nan=False`` hardening, which changes no previously-valid
+    artifact's digest (see that function's docstring) -- so the whole
+    codebase has exactly one canonicalization rule, never two slightly
+    different ones."""
+    return json.dumps(terms, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def content_hash(terms: dict[str, Any]) -> str:

@@ -1,0 +1,6 @@
+{
+  "description": "Raw JSON text (NOT an already-parsed object) containing a duplicate object key ('version' appears twice). Per spec section 2f, any implementation that deserializes raw JSON text before canonicalizing/verifying an artifact must reject this outright, rather than silently keeping the first or last occurrence of 'version'. This does not exercise message_integrity.proofs.canonicalize directly (which takes an already-parsed dict, and a dict cannot have a duplicate key by construction) -- it exercises message_integrity.proofs.strict_json_loads, the strict-parsing helper for any transport that does hand an implementation raw JSON text.",
+  "case": "parse_failure",
+  "expected_failure_reason": "duplicate_key_rejected",
+  "raw_json_text": "{\"artifact_id\":\"art_vector_06\",\"type\":\"request_for_quote\",\"version\":1,\"version\":2}"
+}

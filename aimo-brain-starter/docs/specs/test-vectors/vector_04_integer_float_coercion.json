@@ -1,0 +1,31 @@
+{
+  "description": "Demonstrates the number-normalization rule from section 2 of the spec: an artifact whose 'version' field arrives as a JSON float (1.0, as A2A's protobuf Struct transport would deliver it) must canonicalize and digest IDENTICALLY to the same artifact with 'version' as a JSON integer (1). This is not a sign/verify case -- it isolates the canonicalization+digest step so an implementer can check it without needing a key pair at all.",
+  "case": "digest_equivalence",
+  "artifact_with_integer_version": {
+    "artifact_id": "art_vector_01",
+    "transaction_id": "txn_vector_01",
+    "correlation_id": "corr_vector_01",
+    "sender_agent_id": "agent_vector_buyer_01",
+    "recipient_agent_id": "agent_vector_supplier_01",
+    "organization_id": "org_vector_buyer_01",
+    "type": "request_for_quote",
+    "version": 1,
+    "payload": {"lines": [{"product_ref": "sku_0001", "quantity": "10"}]},
+    "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85"
+  },
+  "artifact_with_float_version": {
+    "artifact_id": "art_vector_01",
+    "transaction_id": "txn_vector_01",
+    "correlation_id": "corr_vector_01",
+    "sender_agent_id": "agent_vector_buyer_01",
+    "recipient_agent_id": "agent_vector_supplier_01",
+    "organization_id": "org_vector_buyer_01",
+    "type": "request_for_quote",
+    "version": 1.0,
+    "payload": {"lines": [{"product_ref": "sku_0001", "quantity": "10"}]},
+    "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85"
+  },
+  "expected_digest_both": "69f888a4798c909142ceb914d83f3f8813d60a5485dfcd9774eff260f5b4b4de",
+  "expected_canonicalized_form_both": "{\"artifact_id\":\"art_vector_01\",\"content_hash\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85\",\"correlation_id\":\"corr_vector_01\",\"organization_id\":\"org_vector_buyer_01\",\"payload\":{\"lines\":[{\"product_ref\":\"sku_0001\",\"quantity\":\"10\"}]},\"recipient_agent_id\":\"agent_vector_supplier_01\",\"sender_agent_id\":\"agent_vector_buyer_01\",\"transaction_id\":\"txn_vector_01\",\"type\":\"request_for_quote\",\"version\":1}",
+  "non_example_note": "A non-integer float (e.g. 1.5) or a decimal/monetary value is NEVER normalized this way -- this protocol only ever puts integers or decimal strings in a legitimate artifact, so this rule only ever fires on an integer-valued float. A conformant implementation must not generalize this into rounding or truncating arbitrary floats."
+}

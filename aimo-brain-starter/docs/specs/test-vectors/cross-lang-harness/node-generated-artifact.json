@@ -1,0 +1,39 @@
+{
+  "description": "An artifact signed ENTIRELY by the Node.js cross-language harness (generate-artifact.mjs), for the Python reference implementation to verify -- proving the Node.js -> Python direction of interoperability, not just Python -> Node.js.",
+  "kid": "org_node_generated_01-k1",
+  "public_key_jwk": {
+    "kty": "OKP",
+    "crv": "Ed25519",
+    "kid": "org_node_generated_01-k1",
+    "x": "doDSYpJtAANqgFozZ7_Ub_ymJQ8jnBIFNO789S6st3M",
+    "use": "sig",
+    "alg": "EdDSA"
+  },
+  "signer_organization_id": "org_node_generated_01",
+  "expected_recipient_organization_id": "org_vector_supplier_01",
+  "signed_artifact": {
+    "artifact_id": "art_node_generated_01",
+    "transaction_id": "txn_node_generated_01",
+    "correlation_id": "corr_node_generated_01",
+    "sender_agent_id": "agent_node_generated_01",
+    "recipient_agent_id": "agent_vector_supplier_01",
+    "organization_id": "org_node_generated_01",
+    "type": "request_for_quote",
+    "version": 1,
+    "payload": {
+      "lines": [
+        {
+          "product_ref": "sku_0002",
+          "quantity": "5",
+          "note": "généré par Node.js"
+        }
+      ]
+    },
+    "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85",
+    "proof": {
+      "alg": "EdDSA",
+      "kid": "org_node_generated_01-k1",
+      "jws": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSIsImtpZCI6Im9yZ19ub2RlX2dlbmVyYXRlZF8wMS1rMSJ9.eyJpc3MiOiJvcmdfbm9kZV9nZW5lcmF0ZWRfMDEiLCJzdWIiOiJhZ2VudF9ub2RlX2dlbmVyYXRlZF8wMSIsImF1ZCI6Im9yZ192ZWN0b3Jfc3VwcGxpZXJfMDEiLCJuZWciOiJ0eG5fbm9kZV9nZW5lcmF0ZWRfMDEiLCJ0eXAiOiJyZXF1ZXN0X2Zvcl9xdW90ZSIsInZlciI6MSwiaGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NSIsImFydGlmYWN0X2RpZ2VzdCI6IjcwMTA3YjEzZDM0Y2ExMDNjM2RiODg0M2M4NjM2ZjgwMzg4ZjgzZmMxNjgzYjI3YWJlYzE5NzM1OTc2ZDg2MjMiLCJqdGkiOiJqdGlfbm9kZV9nZW5lcmF0ZWRfMDEiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6NDAwMDAwMDAwMH0.PYd97I-QF1nd6TFDgjHbAwhG-s88zig6IVKwucOd5r-MXbAT9QnZRBJujv_ItQl3A_tJiqd0zkTbVMAi4vWFCg"
+    }
+  }
+}
