@@ -40,9 +40,7 @@ async def _fresh_app(monkeypatch, *, fake_card=None):
         from sqlalchemy import text as _text
 
         try:
-            count = (
-                await conn.execute(_text("SELECT COUNT(*) FROM registry_agents"))
-            ).scalar_one()
+            count = (await conn.execute(_text("SELECT COUNT(*) FROM registry_agents"))).scalar_one()
             print(
                 f"[DIAG] url={settings.registry_database_url!r} "
                 f"registry_agents rowcount after create_all={count}",
