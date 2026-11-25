@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import httpx
@@ -61,7 +62,9 @@ class HttpJwksResolver(JwksResolver):
         network_api_url: str,
         cache_ttl_seconds: float = 300.0,
         http_client: httpx.AsyncClient | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        self._clock = clock
         self._network_api_url = network_api_url.rstrip("/")
         self._cache_ttl_seconds = cache_ttl_seconds
         self._http_client = http_client
@@ -100,7 +103,7 @@ class HttpJwksResolver(JwksResolver):
         commitment-adjacent artifact types) bypasses the cache
         entirely, even when the cached entry is still within its TTL."""
         entry = self._cache.get(organization_id)
-        now = time.monotonic()
+        now = self._clock()
         if force_fresh or entry is None or (now - entry.fetched_at) > self._cache_ttl_seconds:
             keys = await self._fetch(organization_id)
             entry = _CacheEntry(keys=keys, fetched_at=now)
