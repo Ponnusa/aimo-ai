@@ -16,13 +16,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 from message_integrity import (
+    HttpDelegationResolver,
     HttpJwksResolver,
     ProofError,
     VerifiedProof,
     private_key_from_pem,
 )
 from message_integrity import sign_artifact as _sign_artifact
-from message_integrity import verify_artifact_proof as _verify_artifact_proof
+from message_integrity import verify_artifact_proof_with_delegation as _verify_artifact_proof
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -42,6 +43,10 @@ class MessageAuthenticationError(Exception):
 #: One resolver per network-api URL, reused across calls so its
 #: internal JWKS cache (bounded TTL) actually has something to cache.
 _resolver_cache: dict[str, HttpJwksResolver] = {}
+#: One delegation resolver per network-api URL (M8 slice 2, ADR-017) —
+#: wraps the matching JWKS resolver above, since verifying a delegation
+#: itself requires resolving its issuing root key.
+_delegation_resolver_cache: dict[str, HttpDelegationResolver] = {}
 
 
 def _get_resolver(network_api_url: str) -> HttpJwksResolver:
@@ -49,6 +54,16 @@ def _get_resolver(network_api_url: str) -> HttpJwksResolver:
     if resolver is None:
         resolver = HttpJwksResolver(network_api_url=network_api_url)
         _resolver_cache[network_api_url] = resolver
+    return resolver
+
+
+def _get_delegation_resolver(network_api_url: str) -> HttpDelegationResolver:
+    resolver = _delegation_resolver_cache.get(network_api_url)
+    if resolver is None:
+        resolver = HttpDelegationResolver(
+            network_api_url=network_api_url, jwks_resolver=_get_resolver(network_api_url)
+        )
+        _delegation_resolver_cache[network_api_url] = resolver
     return resolver
 
 
@@ -77,11 +92,15 @@ async def verify_inbound_artifact(
     tampering, scope mismatch, expiry, replay, unregistered/inactive
     sender agent, or no active trading relationship."""
     resolver = _get_resolver(settings.network_api_url)
+    delegation_resolver = _get_delegation_resolver(settings.network_api_url)
     try:
         verified = await _verify_artifact_proof(
             artifact,
             jwks_resolver=resolver,
+            delegation_resolver=delegation_resolver,
             expected_recipient_organization_id=settings.buyer_organization_id,
+            network_audience=settings.network_audience,
+            protocol_version=settings.aimo_protocol_version,
         )
     except ProofError as exc:
         raise MessageAuthenticationError(f"Message proof rejected: {exc}") from exc

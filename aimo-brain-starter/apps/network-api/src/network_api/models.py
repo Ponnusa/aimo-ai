@@ -12,7 +12,16 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database import Base
@@ -106,6 +115,87 @@ class OrganizationSigningKeyRecord(Base):
     kid: Mapped[str] = mapped_column(String, nullable=False)
     public_key_jwk_json: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False, default="active")
+    not_before: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    not_after: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class OrganizationKidNamespaceRecord(Base):
+    """A pure namespace-reservation table (M8 slice 2, ADR-017) — holds no
+    key material of its own. Both the root-key-rotation write path
+    (``organization_signing_keys``) and the per-agent-delegation write
+    path (``agent_signing_delegations``) insert one row here, in the
+    same transaction as their own table's insert, before either commits.
+    Its composite primary key is the one thing that makes the two
+    keyspaces atomically, symmetrically collision-free: whichever write
+    reaches the database first wins this row, and the loser's insert
+    raises ``IntegrityError`` — turned into a deterministic 409 by the
+    caller — regardless of which of the two write paths it came from.
+    This is deliberately simpler than a row-level advisory lock: the
+    unique constraint itself *is* the atomic check, with no separate
+    lock-then-check-then-write sequence to get wrong."""
+
+    __tablename__ = "organization_kid_namespace"
+
+    organization_id: Mapped[str] = mapped_column(String, primary_key=True)
+    kid: Mapped[str] = mapped_column(String, primary_key=True)
+    #: "root" (organization_signing_keys) or "delegated"
+    #: (agent_signing_delegations) — informational only, never used to
+    #: bypass the uniqueness check itself.
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class AgentSigningDelegationRecord(Base):
+    """A per-agent signing-authority delegation (M8 slice 2, ADR-017).
+    The signed JWS token (``delegation_jws``) is constructed and signed
+    entirely inside the organization's own trust boundary — network-api
+    never holds or sees a private key, only verifies this token against
+    that organization's own currently-live root JWKS before storing it.
+    ``revoked_at`` is deliberately *not* part of the signed claims (it is
+    this service's own mutable, server-held fact about the token, not
+    something the token asserts about itself) — see ADR-017's revocation
+    section.
+
+    ``(organization_id, delegated_kid)`` is permanently unique (never
+    reused, even after revocation) — this is also what makes a
+    revoke-then-republish-the-identical-token race safe: the original
+    row still occupies that unique slot, so resubmitting the same token
+    after revocation hits this constraint rather than resurrecting it.
+    ``(organization_id, pubkey_thumbprint)`` is unique only among
+    currently-*live* (unrevoked) rows, organization-wide across every
+    agent — enforced by the partial unique index below — so the same
+    key material can never be concurrently delegated to two different
+    agents in one organization, while still allowing reuse once a prior
+    delegation using that key has been explicitly revoked.
+    """
+
+    __tablename__ = "agent_signing_delegations"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "delegated_kid", name="uq_org_delegated_kid"),
+        Index(
+            "uq_org_live_pubkey_thumbprint",
+            "organization_id",
+            "pubkey_thumbprint",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+            sqlite_where=text("revoked_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    organization_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    agent_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    delegated_kid: Mapped[str] = mapped_column(String, nullable=False)
+    delegated_pubkey_jwk_json: Mapped[str] = mapped_column(Text, nullable=False)
+    pubkey_thumbprint: Mapped[str] = mapped_column(String, nullable=False)
+    issuing_kid: Mapped[str] = mapped_column(String, nullable=False)
+    audience: Mapped[str] = mapped_column(String, nullable=False)
+    #: JSON: {"artifact_types": [...], "protocol_version": "..."}
+    scope_json: Mapped[str] = mapped_column(Text, nullable=False)
+    jti: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    delegation_jws: Mapped[str] = mapped_column(Text, nullable=False)
     not_before: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     not_after: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)

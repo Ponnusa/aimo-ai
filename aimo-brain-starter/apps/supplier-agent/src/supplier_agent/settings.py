@@ -84,6 +84,17 @@ class SupplierAgentSettings(ServiceSettings):
         default="http://localhost:8000",
         validation_alias="NETWORK_API_URL",
     )
+    # M8 slice 2 (ADR-017): see buyer_agent.settings.BuyerAgentSettings'
+    # identical fields for the full rationale — a delegation's ``aud``
+    # is semantically distinct from a business-artifact proof's ``aud``.
+    network_audience: str = Field(
+        default="aimo-network:dev",
+        validation_alias="NETWORK_AUDIENCE",
+    )
+    aimo_protocol_version: str = Field(
+        default="v1",
+        validation_alias="AIMO_PROTOCOL_VERSION",
+    )
     # M5.1: registry-api lookup to confirm an inbound message's verified
     # sender is a registered, active agent with an active trading
     # relationship (this agent never called registry-api directly

@@ -30,6 +30,19 @@ from message_integrity.jwks import JwksResolver
 ALGORITHM = "EdDSA"
 DEFAULT_VALIDITY_SECONDS = 600
 
+#: Domain-separation header values (M8 slice 2, ADR-017). A business
+#: artifact's JWS carries ``typ: ARTIFACT_TYP`` going forward; a
+#: delegation token (``message_integrity.delegations``) carries
+#: ``typ: DELEGATION_TYP`` — the two are structurally distinguishable by
+#: header alone. ``TYP_LEGACY_VALUES`` is accepted ONLY for business
+#: artifacts, so that no artifact signed before this slice (which never
+#: set an explicit ``typ`` and so carried PyJWT's own default, ``"JWT"``)
+#: is invalidated — it verifies exactly as before, recorded as
+#: ``typ_version="legacy"`` rather than rejected.
+ARTIFACT_TYP = "aimo-artifact+jws"
+DELEGATION_TYP = "aimo-delegation+jws"
+TYP_LEGACY_VALUES = frozenset({None, "JWT"})
+
 
 class ProofError(Exception):
     """Base class for every reason a proof can be rejected."""
@@ -69,6 +82,16 @@ class VerifiedProof:
     jti: str
     issued_at: int
     expires_at: int
+    #: "organization" (signed directly by an org root key — proves
+    #: organization-level authority only, not which agent/key produced
+    #: it) or "delegated_agent" (signed by a key the organization
+    #: explicitly delegated to this exact agent — M8 slice 2, ADR-017).
+    #: Defaults to "organization" so every pre-slice-2 construction site
+    #: (including existing tests) keeps its prior meaning unchanged.
+    attribution: str = "organization"
+    #: "legacy" (no explicit ``typ``, or PyJWT's old default ``"JWT"``)
+    #: or "v1" (the new explicit ``ARTIFACT_TYP`` discriminator).
+    typ_version: str = "legacy"
 
 
 def canonicalize(data: dict[str, Any]) -> str:
@@ -179,45 +202,62 @@ def sign_artifact(
         "iat": now,
         "exp": now + validity_seconds,
     }
-    token = jwt.encode(claims, private_key, algorithm=ALGORITHM, headers={"kid": kid})
+    token = jwt.encode(
+        claims, private_key, algorithm=ALGORITHM, headers={"kid": kid, "typ": ARTIFACT_TYP}
+    )
     signed = dict(artifact)
     signed["proof"] = {"alg": ALGORITHM, "kid": kid, "jws": token}
     return signed
 
 
-async def verify_artifact_proof(
-    artifact: dict[str, Any],
-    *,
-    jwks_resolver: JwksResolver,
-    expected_recipient_organization_id: str,
-) -> VerifiedProof:
-    """Cryptographic + scope verification only (steps 1-7). Raises a
-    specific :class:`ProofError` subclass on any failure — callers must
-    still perform replay/registry/relationship/participant checks
-    before trusting the result for a business decision."""
-    proof = artifact.get("proof")
-    if not proof or "jws" not in proof:
-        raise MissingProofError("Artifact carries no proof.")
-
-    token = proof["jws"]
+def parse_unverified_proof(token: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Decode (without verifying) a proof token's header and claims —
+    shared by the plain org-key path and M8 slice 2's delegation-aware
+    orchestrator, so both inspect the exact same unverified view before
+    deciding which keyspace to resolve against."""
     try:
         header = jwt.get_unverified_header(token)
         unverified_claims = jwt.decode(token, options={"verify_signature": False})
     except jwt.exceptions.PyJWTError as exc:
         raise InvalidSignatureError(f"Malformed proof: {exc}") from exc
+    return header, unverified_claims
 
-    kid = header.get("kid")
-    issuer_organization_id = unverified_claims.get("iss")
-    if not kid or not issuer_organization_id:
-        raise InvalidSignatureError("Proof is missing a kid or issuer.")
 
-    try:
-        public_key: Ed25519PublicKey = await jwks_resolver.get_key(
-            organization_id=issuer_organization_id, kid=kid
+def _check_artifact_typ(header: dict[str, Any]) -> str:
+    """Reject a delegation token presented as a business artifact, and
+    any other unrecognized ``typ`` — accept only the new explicit
+    discriminator or a legacy (pre-slice-2) value. Returns the resolved
+    ``typ_version`` ("legacy" or "v1")."""
+    typ = header.get("typ")
+    if typ == DELEGATION_TYP:
+        raise InvalidSignatureError(
+            "A delegation token cannot be verified as a business-artifact proof."
         )
-    except Exception as exc:  # KeyNotFoundError or a resolver-specific failure
-        raise InvalidSignatureError(f"Could not resolve signing key: {exc}") from exc
+    if typ in TYP_LEGACY_VALUES:
+        return "legacy"
+    if typ == ARTIFACT_TYP:
+        return "v1"
+    raise InvalidSignatureError(f"Unrecognized proof 'typ' header: {typ!r}.")
 
+
+def verify_artifact_proof_with_known_key(
+    artifact: dict[str, Any],
+    *,
+    token: str,
+    header: dict[str, Any],
+    public_key: Ed25519PublicKey,
+    issuer_organization_id: str,
+    expected_recipient_organization_id: str,
+    attribution: str,
+) -> VerifiedProof:
+    """Steps 3-7 of verification, once a candidate public key has
+    already been resolved (from either the organization-root keyspace
+    or a per-agent delegation's key — the caller decides which and
+    passes the correct ``attribution``). Factored out of
+    :func:`verify_artifact_proof` so M8 slice 2's delegation-aware
+    orchestrator can reuse the exact same digest/scope/claim checks
+    without duplicating them for the delegated path."""
+    typ_version = _check_artifact_typ(header)
     try:
         claims = jwt.decode(
             token,
@@ -258,11 +298,62 @@ async def verify_artifact_proof(
         jti=claims["jti"],
         issued_at=claims["iat"],
         expires_at=claims["exp"],
+        attribution=attribution,
+        typ_version=typ_version,
+    )
+
+
+async def verify_artifact_proof(
+    artifact: dict[str, Any],
+    *,
+    jwks_resolver: JwksResolver,
+    expected_recipient_organization_id: str,
+) -> VerifiedProof:
+    """Cryptographic + scope verification only (steps 1-7), against an
+    organization's *root* key only — unchanged, pre-slice-2 behavior,
+    kept as its own entry point so every existing call site keeps
+    working exactly as before. Raises a specific :class:`ProofError`
+    subclass on any failure — callers must still perform
+    replay/registry/relationship/participant checks before trusting the
+    result for a business decision. M8 slice 2 callers that also need to
+    resolve a per-agent delegated key should use
+    :func:`message_integrity.delegated_verification.verify_artifact_proof_with_delegation`
+    instead."""
+    proof = artifact.get("proof")
+    if not proof or "jws" not in proof:
+        raise MissingProofError("Artifact carries no proof.")
+
+    token = proof["jws"]
+    header, unverified_claims = parse_unverified_proof(token)
+
+    kid = header.get("kid")
+    issuer_organization_id = unverified_claims.get("iss")
+    if not kid or not issuer_organization_id:
+        raise InvalidSignatureError("Proof is missing a kid or issuer.")
+
+    try:
+        public_key: Ed25519PublicKey = await jwks_resolver.get_key(
+            organization_id=issuer_organization_id, kid=kid
+        )
+    except Exception as exc:  # KeyNotFoundError or a resolver-specific failure
+        raise InvalidSignatureError(f"Could not resolve signing key: {exc}") from exc
+
+    return verify_artifact_proof_with_known_key(
+        artifact,
+        token=token,
+        header=header,
+        public_key=public_key,
+        issuer_organization_id=issuer_organization_id,
+        expected_recipient_organization_id=expected_recipient_organization_id,
+        attribution="organization",
     )
 
 
 __all__ = [
+    "ARTIFACT_TYP",
     "DEFAULT_VALIDITY_SECONDS",
+    "DELEGATION_TYP",
+    "TYP_LEGACY_VALUES",
     "ExpiredProofError",
     "InvalidSignatureError",
     "MissingProofError",
@@ -271,7 +362,9 @@ __all__ = [
     "TamperedArtifactError",
     "VerifiedProof",
     "canonicalize",
+    "parse_unverified_proof",
     "sign_artifact",
     "strict_json_loads",
     "verify_artifact_proof",
+    "verify_artifact_proof_with_known_key",
 ]

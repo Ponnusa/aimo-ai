@@ -17,12 +17,19 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI, Header, HTTPException
+from message_integrity import DelegationError, KeyNotFoundError
+from message_integrity.delegations import delegated_pubkey_thumbprint, verify_delegation_token
+from message_integrity.jwks import JwksResolver
+from message_integrity.keys import public_key_from_jwk
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from database import new_engine, new_session_factory
 from identity import issue_service_credential
 from network_api.models import (
+    AgentSigningDelegationRecord,
+    OrganizationKidNamespaceRecord,
     OrganizationMemberRecord,
     OrganizationRecord,
     OrganizationSigningKeyRecord,
@@ -168,6 +175,66 @@ class RelationshipOut(BaseModel):
     buyer_organization_id: str
     supplier_organization_id: str
     status: str
+
+
+class DelegationPublishIn(BaseModel):
+    #: The compact JWS the organization constructed and signed entirely
+    #: within its own trust boundary (M8 slice 2, ADR-017). network-api
+    #: never signs this and never receives a private key — it only
+    #: cryptographically verifies this token against the organization's
+    #: own currently-live root JWKS before storing and serving it.
+    jws: str
+
+
+class DelegationOut(BaseModel):
+    organization_id: str
+    agent_id: str
+    delegated_kid: str
+    audience: str
+    scope: dict[str, object]
+    jti: str
+    not_before: str
+    not_after: str
+    status: str
+
+
+class DelegationsListOut(BaseModel):
+    delegations: list[str]
+
+
+class _LocalOrganizationRootKeyResolver(JwksResolver):
+    """A :class:`message_integrity.jwks.JwksResolver` backed directly by
+    this service's own database — used only for network-api's own
+    publish-time verification of a submitted delegation, never over
+    HTTP (network-api is the one party that already has direct access
+    to ``organization_signing_keys``, so looping back through its own
+    ``/jwks.json`` endpoint would be pointless indirection)."""
+
+    def __init__(self, session_factory) -> None:
+        self._session_factory = session_factory
+
+    def invalidate(self, organization_id: str) -> None:
+        return None
+
+    async def get_key(self, *, organization_id: str, kid: str, force_fresh: bool = False):
+        now = datetime.now(UTC).replace(tzinfo=None)
+        async with self._session_factory() as session:
+            row = (
+                await session.execute(
+                    select(OrganizationSigningKeyRecord).where(
+                        OrganizationSigningKeyRecord.organization_id == organization_id,
+                        OrganizationSigningKeyRecord.kid == kid,
+                        OrganizationSigningKeyRecord.status != "revoked",
+                        OrganizationSigningKeyRecord.not_before <= now,
+                        OrganizationSigningKeyRecord.not_after >= now,
+                    )
+                )
+            ).scalar_one_or_none()
+        if row is None:
+            raise KeyNotFoundError(
+                f"No valid root key {kid!r} for organization {organization_id!r}."
+            )
+        return public_key_from_jwk(json.loads(row.public_key_jwk_json))
 
 
 def _require_admin(x_admin_key: str | None, *, expected: str) -> None:
@@ -441,7 +508,26 @@ def create_app() -> FastAPI:
                 revoked_at=None,
             )
             session.add(record)
-            await session.commit()
+            # M8 slice 2 (ADR-017): both this write path and delegation
+            # publication insert into the shared kid-namespace table in
+            # the same transaction as their own row, before either
+            # commits — the table's composite primary key is what makes
+            # the two keyspaces atomically, symmetrically collision-free.
+            session.add(
+                OrganizationKidNamespaceRecord(
+                    organization_id=organization_id, kid=body.kid, kind="root", created_at=now
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Key id {body.kid!r} collides with an existing root or "
+                        f"delegated kid for this organization."
+                    ),
+                ) from exc
             return SigningKeyOut(
                 organization_id=organization_id,
                 kid=body.kid,
@@ -509,6 +595,182 @@ def create_app() -> FastAPI:
                 .all()
             )
             return {"keys": [json.loads(row.public_key_jwk_json) for row in rows]}
+
+    # --- Per-agent signing delegations (M8 slice 2, ADR-017) -------------
+
+    @app.post("/organizations/{organization_id}/delegations", response_model=DelegationOut)
+    async def publish_delegation(
+        organization_id: str,
+        body: DelegationPublishIn,
+        x_admin_key: str | None = Header(default=None),
+    ) -> DelegationOut:
+        """Verify an organization-signed delegation token and store it.
+        Authenticated by the same admin-key boundary that already
+        governs root-key rotation (``/signing-keys``) — this is not a
+        new trust surface, and does not touch the separate,
+        still-closed shared-HMAC registry-authentication gate
+        (ADR-016). network-api never signs anything here; it only
+        verifies ``body.jws`` against this organization's own current
+        root JWKS and, if valid, persists it."""
+        _require_admin(x_admin_key, expected=settings.network_admin_api_key)
+        async with session_factory() as session:
+            if await session.get(OrganizationRecord, organization_id) is None:
+                raise HTTPException(
+                    status_code=404, detail=f"Organization {organization_id!r} does not exist."
+                )
+
+        resolver = _LocalOrganizationRootKeyResolver(session_factory)
+        try:
+            verified = await verify_delegation_token(body.jws, jwks_resolver=resolver)
+        except DelegationError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid delegation token: {exc}") from exc
+
+        if verified.organization_id != organization_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Delegation issuer {verified.organization_id!r} does not match "
+                    f"the organization {organization_id!r} this was submitted to."
+                ),
+            )
+
+        delegated_kid = verified.delegated_kid
+        delegated_pubkey_jwk = verified.delegated_pubkey_jwk
+        thumbprint = delegated_pubkey_thumbprint(delegated_pubkey_jwk)
+
+        now = datetime.now(UTC).replace(tzinfo=None)
+        async with session_factory() as session:
+            existing_by_kid = (
+                await session.execute(
+                    select(AgentSigningDelegationRecord).where(
+                        AgentSigningDelegationRecord.organization_id == organization_id,
+                        AgentSigningDelegationRecord.delegated_kid == delegated_kid,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing_by_kid is not None:
+                # Permanently unique, by design (ADR-017) — this is also
+                # what makes a revoke-then-republish-the-identical-token
+                # race safe: the original row still occupies this slot.
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Delegated kid {delegated_kid!r} is already registered for this "
+                    "organization and cannot be reused, even by its original issuer.",
+                )
+
+            record = AgentSigningDelegationRecord(
+                organization_id=organization_id,
+                agent_id=verified.agent_id,
+                delegated_kid=delegated_kid,
+                delegated_pubkey_jwk_json=json.dumps(delegated_pubkey_jwk),
+                pubkey_thumbprint=thumbprint,
+                issuing_kid=verified.issuing_kid,
+                audience=verified.audience,
+                scope_json=json.dumps(verified.scope.to_claim()),
+                jti=verified.jti,
+                delegation_jws=body.jws,
+                not_before=datetime.fromtimestamp(verified.issued_at, tz=UTC).replace(tzinfo=None),
+                not_after=datetime.fromtimestamp(verified.expires_at, tz=UTC).replace(tzinfo=None),
+                created_at=now,
+                revoked_at=None,
+            )
+            session.add(record)
+            session.add(
+                OrganizationKidNamespaceRecord(
+                    organization_id=organization_id,
+                    kid=delegated_kid,
+                    kind="delegated",
+                    created_at=now,
+                )
+            )
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Delegated kid {delegated_kid!r} collides with an existing root "
+                        f"or delegated kid, or key material {thumbprint!r} is already "
+                        f"delegated to a different, currently-live agent in this "
+                        f"organization."
+                    ),
+                ) from exc
+
+            return DelegationOut(
+                organization_id=organization_id,
+                agent_id=record.agent_id,
+                delegated_kid=delegated_kid,
+                audience=record.audience,
+                scope=json.loads(record.scope_json),
+                jti=record.jti,
+                not_before=record.not_before.isoformat(),
+                not_after=record.not_after.isoformat(),
+                status="active",
+            )
+
+    @app.get("/organizations/{organization_id}/delegations.json", response_model=DelegationsListOut)
+    async def get_delegations(organization_id: str) -> DelegationsListOut:
+        """Public, unauthenticated, exactly like ``/jwks.json``: every
+        currently-live (unrevoked, within its validity window)
+        delegation token for this organization, served as the original
+        signed JWS strings — a resolver re-verifies each one
+        cryptographically before trusting it; storing/serving this data
+        never lets anyone forge a new delegation, only redistribute
+        ones the organization itself already signed."""
+        now = datetime.now(UTC).replace(tzinfo=None)
+        async with session_factory() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(AgentSigningDelegationRecord).where(
+                            AgentSigningDelegationRecord.organization_id == organization_id,
+                            AgentSigningDelegationRecord.revoked_at.is_(None),
+                            AgentSigningDelegationRecord.not_before <= now,
+                            AgentSigningDelegationRecord.not_after >= now,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return DelegationsListOut(delegations=[row.delegation_jws for row in rows])
+
+    @app.post(
+        "/organizations/{organization_id}/delegations/{jti}/revoke", response_model=DelegationOut
+    )
+    async def revoke_delegation(
+        organization_id: str, jti: str, x_admin_key: str | None = Header(default=None)
+    ) -> DelegationOut:
+        """Immediate revocation, mirroring ``/signing-keys/{kid}/revoke``:
+        a revoked delegation is excluded from ``/delegations.json`` on
+        the very next request. ``revoked_at`` lives here, as mutable
+        server-held metadata — never inside the delegation's own signed
+        claims (ADR-017)."""
+        _require_admin(x_admin_key, expected=settings.network_admin_api_key)
+        async with session_factory() as session:
+            record = (
+                await session.execute(
+                    select(AgentSigningDelegationRecord).where(
+                        AgentSigningDelegationRecord.organization_id == organization_id,
+                        AgentSigningDelegationRecord.jti == jti,
+                    )
+                )
+            ).scalar_one_or_none()
+            if record is None:
+                raise HTTPException(status_code=404, detail="Delegation not found.")
+            record.revoked_at = datetime.now(UTC).replace(tzinfo=None)
+            await session.commit()
+            return DelegationOut(
+                organization_id=organization_id,
+                agent_id=record.agent_id,
+                delegated_kid=record.delegated_kid,
+                audience=record.audience,
+                scope=json.loads(record.scope_json),
+                jti=record.jti,
+                not_before=record.not_before.isoformat(),
+                not_after=record.not_after.isoformat(),
+                status="revoked",
+            )
 
     # --- Organization membership and roles (M6) -------------------------
 

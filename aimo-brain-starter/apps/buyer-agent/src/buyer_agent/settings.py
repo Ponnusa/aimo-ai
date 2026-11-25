@@ -93,6 +93,24 @@ class BuyerAgentSettings(ServiceSettings):
         validation_alias="NETWORK_API_URL",
     )
 
+    # M8 slice 2 (ADR-017): a delegation's signed ``aud`` claim denotes
+    # the network/environment it is valid in — distinct from a
+    # business-artifact proof's ``aud``, which denotes the recipient
+    # organization_id (unchanged). Every deployment of this agent must
+    # share the same value as its counterparties for a delegation to
+    # verify at all.
+    network_audience: str = Field(
+        default="aimo-network:dev",
+        validation_alias="NETWORK_AUDIENCE",
+    )
+    # The AIMO business-protocol version this agent's own delegations
+    # (and the delegations it will accept from counterparties) are
+    # scoped to.
+    aimo_protocol_version: str = Field(
+        default="v1",
+        validation_alias="AIMO_PROTOCOL_VERSION",
+    )
+
     # M6: the portal's management API calls this agent with a
     # "manage_organization"-scoped service credential, minted by
     # network-api with the same shared HMAC secret already used for

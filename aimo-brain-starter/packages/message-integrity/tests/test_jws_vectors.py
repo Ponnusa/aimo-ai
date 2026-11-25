@@ -179,6 +179,54 @@ async def test_node_generated_artifact_verifies_in_python() -> None:
     assert verified.agent_id == vector["signed_artifact"]["sender_agent_id"]
 
 
+@pytest.mark.asyncio
+async def test_node_generated_delegation_verifies_in_python() -> None:
+    """M8 slice 2 (ADR-017), Node.js -> Python direction: a delegation
+    AND the artifact it covers, both signed entirely in Node.js
+    (``cross-lang-harness/generate-delegation.mjs``), verified by the
+    real Python two-hop implementation. The companion direction is
+    ``cross-lang-harness/verify-delegation.mjs``, which independently
+    verifies the Python-generated ``vector_07_delegation.json``."""
+    from message_integrity import InMemoryDelegationResolver
+    from message_integrity.delegated_verification import verify_artifact_proof_with_delegation
+    from message_integrity.delegations import verify_delegation_token
+
+    path = VECTORS_DIR / "cross-lang-harness" / "node-generated-delegation.json"
+    if not path.exists():
+        pytest.skip(
+            "node-generated-delegation.json not present; regenerate with "
+            "`node generate-delegation.mjs` in cross-lang-harness/."
+        )
+    vector = json.loads(path.read_text(encoding="utf-8"))
+
+    resolver = InMemoryJwksResolver()
+    root_jwk = vector["root_public_key_jwk"]
+    resolver.register(
+        organization_id=vector["organization_id"],
+        kid=root_jwk["kid"],
+        public_key=public_key_from_jwk(root_jwk),
+    )
+    delegation = await verify_delegation_token(
+        vector["delegation_jws"],
+        jwks_resolver=resolver,
+        expected_audience=vector["network_audience"],
+    )
+    delegation_resolver = InMemoryDelegationResolver()
+    delegation_resolver.register(delegation)
+
+    verified = await verify_artifact_proof_with_delegation(
+        vector["signed_artifact"],
+        jwks_resolver=resolver,
+        delegation_resolver=delegation_resolver,
+        expected_recipient_organization_id=vector["expected_recipient_organization_id"],
+        network_audience=vector["network_audience"],
+        protocol_version="v1",
+    )
+    assert verified.attribution == "delegated_agent"
+    assert verified.typ_version == "v1"
+    assert verified.agent_id == vector["signed_artifact"]["sender_agent_id"]
+
+
 def test_negative_zero_normalizes_identically_to_zero() -> None:
     # Normalization (spec section 2e) happens in _artifact_digest's call
     # to _normalize_numbers before canonicalize() ever sees the value --
