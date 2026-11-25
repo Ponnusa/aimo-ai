@@ -17,12 +17,9 @@ from dataclasses import dataclass
 
 import httpx
 
-from message_integrity.delegations import (
-    DelegationError,
-    VerifiedDelegation,
-    verify_delegation_token,
-)
+from message_integrity.delegations import VerifiedDelegation, verify_delegation_token
 from message_integrity.jwks import JwksResolver
+from message_integrity.proofs import ProofError
 
 
 class DelegationNotFoundError(Exception):
@@ -97,10 +94,18 @@ class HttpDelegationResolver(DelegationResolver):
                     expected_audience=expected_audience,
                     force_fresh=force_fresh,
                 )
-            except DelegationError:
-                # A delegation that no longer verifies (e.g. its issuing
-                # root key was itself revoked after publication) is
-                # treated as absent, never as a resolver-level failure —
+            except ProofError:
+                # A delegation that no longer verifies is treated as
+                # absent, never as a resolver-level failure — covers both
+                # a delegation-specific rejection (DelegationError, e.g.
+                # bad scope/audience) AND the root-cutover case (M8
+                # slice 3, ADR-018): the issuing root key itself being
+                # revoked/expired surfaces as InvalidSignatureError from
+                # verify_delegation_token's own root-key resolution step,
+                # a ProofError sibling of DelegationError, not a subclass
+                # of it — catching only DelegationError here would let a
+                # root-cutover failure crash this fetch instead of simply
+                # making that one delegation (correctly) disappear, while
                 # other, still-valid delegations for this organization
                 # must remain usable.
                 continue

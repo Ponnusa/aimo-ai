@@ -48,6 +48,15 @@ class NetworkApiSettings(ServiceSettings):
         validation_alias="SERVICE_CREDENTIAL_SIGNING_SECRET",
     )
 
+    # M8 slice 3 (ADR-018 section 5): how long past a delegation's own
+    # not_after the reservation-release job must wait before it may free
+    # that key's thumbprint for reuse by a different agent. Deliberately
+    # separate from revocation, which is immediate and for-cause.
+    thumbprint_reservation_grace_period_seconds: int = Field(
+        default=86400,
+        validation_alias="THUMBPRINT_RESERVATION_GRACE_PERIOD_SECONDS",
+    )
+
 
 @lru_cache
 def get_settings() -> NetworkApiSettings:

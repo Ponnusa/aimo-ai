@@ -29,6 +29,8 @@ from database import new_engine, new_session_factory
 from identity import issue_service_credential
 from network_api.models import (
     AgentSigningDelegationRecord,
+    KeyEventAccessLogRecord,
+    KeyLifecycleEventRecord,
     OrganizationKidNamespaceRecord,
     OrganizationMemberRecord,
     OrganizationRecord,
@@ -200,6 +202,20 @@ class DelegationOut(BaseModel):
 
 class DelegationsListOut(BaseModel):
     delegations: list[str]
+
+
+class KeyEventOut(BaseModel):
+    organization_id: str
+    kid: str
+    kind: str
+    event_type: str
+    effective_time: str
+    recorded_at: str
+    is_reconstructed_snapshot: bool
+
+
+class KeyEventsListOut(BaseModel):
+    events: list[KeyEventOut]
 
 
 class _LocalOrganizationRootKeyResolver(JwksResolver):
@@ -518,6 +534,21 @@ def create_app() -> FastAPI:
                     organization_id=organization_id, kid=body.kid, kind="root", created_at=now
                 )
             )
+            # M8 slice 3 (ADR-018): the ledger append is atomic with the
+            # lifecycle write it describes -- same transaction, same
+            # commit-or-nothing outcome.
+            session.add(
+                KeyLifecycleEventRecord(
+                    organization_id=organization_id,
+                    kid=body.kid,
+                    kind="root",
+                    event_type="issued",
+                    effective_time=now,
+                    recorded_at=now,
+                    key_material=record.public_key_jwk_json,
+                    is_reconstructed_snapshot=False,
+                )
+            )
             try:
                 await session.commit()
             except IntegrityError as exc:
@@ -559,8 +590,21 @@ def create_app() -> FastAPI:
             ).scalar_one_or_none()
             if record is None:
                 raise HTTPException(status_code=404, detail="Signing key not found.")
+            now = datetime.now(UTC).replace(tzinfo=None)
             record.status = "revoked"
-            record.revoked_at = datetime.now(UTC).replace(tzinfo=None)
+            record.revoked_at = now
+            session.add(
+                KeyLifecycleEventRecord(
+                    organization_id=organization_id,
+                    kid=kid,
+                    kind="root",
+                    event_type="revoked",
+                    effective_time=now,
+                    recorded_at=now,
+                    key_material=record.public_key_jwk_json,
+                    is_reconstructed_snapshot=False,
+                )
+            )
             await session.commit()
             return SigningKeyOut(
                 organization_id=organization_id,
@@ -683,6 +727,18 @@ def create_app() -> FastAPI:
                     created_at=now,
                 )
             )
+            session.add(
+                KeyLifecycleEventRecord(
+                    organization_id=organization_id,
+                    kid=delegated_kid,
+                    kind="delegated",
+                    event_type="issued",
+                    effective_time=now,
+                    recorded_at=now,
+                    key_material=body.jws,
+                    is_reconstructed_snapshot=False,
+                )
+            )
             try:
                 await session.commit()
             except IntegrityError as exc:
@@ -758,7 +814,20 @@ def create_app() -> FastAPI:
             ).scalar_one_or_none()
             if record is None:
                 raise HTTPException(status_code=404, detail="Delegation not found.")
-            record.revoked_at = datetime.now(UTC).replace(tzinfo=None)
+            now = datetime.now(UTC).replace(tzinfo=None)
+            record.revoked_at = now
+            session.add(
+                KeyLifecycleEventRecord(
+                    organization_id=organization_id,
+                    kid=record.delegated_kid,
+                    kind="delegated",
+                    event_type="revoked",
+                    effective_time=now,
+                    recorded_at=now,
+                    key_material=record.delegation_jws,
+                    is_reconstructed_snapshot=False,
+                )
+            )
             await session.commit()
             return DelegationOut(
                 organization_id=organization_id,
@@ -770,6 +839,121 @@ def create_app() -> FastAPI:
                 not_before=record.not_before.isoformat(),
                 not_after=record.not_after.isoformat(),
                 status="revoked",
+            )
+
+    @app.post(
+        "/organizations/{organization_id}/delegations/{jti}/release-reservation",
+        response_model=DelegationOut,
+    )
+    async def release_thumbprint_reservation(
+        organization_id: str, jti: str, x_admin_key: str | None = Header(default=None)
+    ) -> DelegationOut:
+        """M8 slice 3 (ADR-018 section 5): frees a delegation's key
+        thumbprint for reuse by a DIFFERENT agent, once it is past its
+        own ``not_after`` plus a grace period. Deliberately NEVER touches
+        ``revoked_at`` -- a routine expiry is not a revocation, and
+        conflating the two would erase the distinction the historical-
+        evidence model (section 1) depends on. Fails closed: refuses
+        (409) a delegation that is not yet past its grace period, so a
+        failed/delayed run of this job always leaves the slot held,
+        never silently frees it early."""
+        _require_admin(x_admin_key, expected=settings.network_admin_api_key)
+        now = datetime.now(UTC).replace(tzinfo=None)
+        grace = timedelta(seconds=settings.thumbprint_reservation_grace_period_seconds)
+        async with session_factory() as session:
+            record = (
+                await session.execute(
+                    select(AgentSigningDelegationRecord).where(
+                        AgentSigningDelegationRecord.organization_id == organization_id,
+                        AgentSigningDelegationRecord.jti == jti,
+                    )
+                )
+            ).scalar_one_or_none()
+            if record is None:
+                raise HTTPException(status_code=404, detail="Delegation not found.")
+            if record.thumbprint_reservation_released_at is not None:
+                # Idempotent no-op -- already released.
+                pass
+            elif now < record.not_after + grace:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Delegation {jti!r} is not yet past its expiry grace period; "
+                        f"its thumbprint reservation cannot be released yet."
+                    ),
+                )
+            else:
+                record.thumbprint_reservation_released_at = now
+                session.add(
+                    KeyLifecycleEventRecord(
+                        organization_id=organization_id,
+                        kid=record.delegated_kid,
+                        kind="delegated",
+                        event_type="reservation_released",
+                        effective_time=now,
+                        recorded_at=now,
+                        key_material=record.delegation_jws,
+                        is_reconstructed_snapshot=False,
+                    )
+                )
+            await session.commit()
+            return DelegationOut(
+                organization_id=organization_id,
+                agent_id=record.agent_id,
+                delegated_kid=record.delegated_kid,
+                audience=record.audience,
+                scope=json.loads(record.scope_json),
+                jti=record.jti,
+                not_before=record.not_before.isoformat(),
+                not_after=record.not_after.isoformat(),
+                status="revoked" if record.revoked_at else "expired",
+            )
+
+    @app.get("/organizations/{organization_id}/key-events.json", response_model=KeyEventsListOut)
+    async def get_key_events(
+        organization_id: str, x_admin_key: str | None = Header(default=None)
+    ) -> KeyEventsListOut:
+        """The append-only historical-evidence ledger (M8 slice 3,
+        ADR-018 section 3) -- never used by, or reachable from, this
+        service's live JWKS/delegations endpoints above. Gated by the
+        same admin-key boundary as other organization-management calls,
+        plus its own access log: the sensitivity of historical evidence
+        justifies knowing who has been looking at it, independent of
+        the (unchanged, still global) admin-key boundary itself."""
+        _require_admin(x_admin_key, expected=settings.network_admin_api_key)
+        async with session_factory() as session:
+            session.add(
+                KeyEventAccessLogRecord(
+                    queried_organization_id=organization_id,
+                    queried_at=datetime.now(UTC).replace(tzinfo=None),
+                    caller_identifier="admin",
+                )
+            )
+            await session.commit()
+            rows = (
+                (
+                    await session.execute(
+                        select(KeyLifecycleEventRecord)
+                        .where(KeyLifecycleEventRecord.organization_id == organization_id)
+                        .order_by(KeyLifecycleEventRecord.id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            return KeyEventsListOut(
+                events=[
+                    KeyEventOut(
+                        organization_id=row.organization_id,
+                        kid=row.kid,
+                        kind=row.kind,
+                        event_type=row.event_type,
+                        effective_time=row.effective_time.isoformat(),
+                        recorded_at=row.recorded_at.isoformat(),
+                        is_reconstructed_snapshot=row.is_reconstructed_snapshot,
+                    )
+                    for row in rows
+                ]
             )
 
     # --- Organization membership and roles (M6) -------------------------

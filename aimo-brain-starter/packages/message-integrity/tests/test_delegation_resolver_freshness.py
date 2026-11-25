@@ -200,3 +200,67 @@ async def test_force_fresh_bypasses_cache_even_within_ttl() -> None:
         organization_id=ORG, kid="agent-k1", expected_audience=NETWORK_AUDIENCE, force_fresh=True
     )
     assert transport.call_count == 2, "force_fresh must bypass a still-valid cache entry"
+
+
+class _RootKeyInfrastructureFailureResolver:
+    """A JwksResolver whose ``get_key`` fails for a reason that is NOT
+    ``KeyNotFoundError`` — simulating a genuine infrastructure failure
+    of the root-key JWKS fetch itself (network-api unreachable, a
+    timeout, a malformed response), as opposed to a legitimate
+    "this kid is not currently valid" answer (revoked/expired/never
+    existed, which real resolvers signal with ``KeyNotFoundError``
+    specifically)."""
+
+    def invalidate(self, organization_id: str) -> None:
+        return None
+
+    async def get_key(self, *, organization_id: str, kid: str, force_fresh: bool = False):
+        raise RuntimeError("simulated network-api outage resolving the root JWKS")
+
+
+@pytest.mark.asyncio
+async def test_root_key_infra_failure_propagates_not_empty_list() -> None:
+    """Merge-review addition, closing a real gap: before this fix,
+    ``verify_delegation_token``'s root-key resolution step caught
+    *any* exception from the JWKS resolver (not just ``KeyNotFoundError``)
+    and converted it into ``InvalidSignatureError`` — a ``ProofError``
+    that ``HttpDelegationResolver._fetch``'s per-token
+    ``except ProofError: continue`` then silently swallowed. A root-key
+    JWKS endpoint that is simply unreachable (not "this key is revoked")
+    would therefore make every delegation signed under it vanish from
+    the resolved list, indistinguishable from "this organization
+    genuinely has no delegations" — a dangerous fail-open-by-omission
+    for exactly the infrastructure-failure case the merge review asked
+    about. This test proves the fix: the lookup now raises instead of
+    silently returning an empty/not-found result."""
+    root_private, root_public = generate_signing_keypair()
+    _, delegated_public = generate_signing_keypair()
+    delegated_jwk = public_key_to_jwk(delegated_public, kid="agent-k1")
+    token = build_delegation(
+        root_private_key=root_private,
+        issuing_kid="org-root1",
+        organization_id=ORG,
+        agent_id="agent_01",
+        audience=NETWORK_AUDIENCE,
+        delegated_kid="agent-k1",
+        delegated_public_key_jwk=delegated_jwk,
+        scope=DelegationScope(artifact_types=("quote",), protocol_version="v1"),
+    )
+    transport = _ScriptedTransport([[token]])
+    http_client = httpx.AsyncClient(transport=transport)
+    resolver = HttpDelegationResolver(
+        network_api_url="http://network-api.test",
+        jwks_resolver=_RootKeyInfrastructureFailureResolver(),
+        http_client=http_client,
+        clock=_FakeClock(start=0.0),
+    )
+
+    # Must NOT resolve to "not found" -- that would be indistinguishable
+    # from a legitimate "no delegations exist" answer. It must raise,
+    # surfacing the real, recoverable infrastructure cause.
+    with pytest.raises(Exception) as excinfo:
+        await resolver.get_delegation(
+            organization_id=ORG, kid="agent-k1", expected_audience=NETWORK_AUDIENCE
+        )
+    assert not isinstance(excinfo.value, DelegationNotFoundError)
+    assert "simulated network-api outage" in str(excinfo.value)

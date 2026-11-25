@@ -182,6 +182,30 @@ class SupplierSeenMessageProofRecord(Base):
     seen_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
+class SupplierVerificationEvidenceReceiptRecord(Base):
+    """See the matching docstring on
+    ``buyer_agent.models.BuyerVerificationEvidenceReceiptRecord`` (M8
+    slice 3, ADR-018 section 2 -- additive to
+    ``SupplierSeenMessageProofRecord``, never a replacement)."""
+
+    __tablename__ = "supplier_verification_evidence_receipts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    jti: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    artifact_digest: Mapped[str | None] = mapped_column(String, nullable=True)
+    kid_used: Mapped[str | None] = mapped_column(String, nullable=True)
+    claimed_artifact_digest: Mapped[str | None] = mapped_column(String, nullable=True)
+    claimed_kid: Mapped[str | None] = mapped_column(String, nullable=True)
+    delegated_kid: Mapped[str | None] = mapped_column(String, nullable=True)
+    organization_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    agent_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    artifact_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    attribution: Mapped[str | None] = mapped_column(String, nullable=True)
+    verification_outcome: Mapped[str] = mapped_column(String, nullable=False)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
 class SupplierActivePolicyPointerRecord(Base):
     """See the matching docstring on
     ``buyer_agent.models.BuyerActivePolicyPointerRecord`` (M6)."""

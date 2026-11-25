@@ -73,6 +73,8 @@ def _build_network_app(database_url: str):
     import network_api.settings as network_settings_module
     from network_api.models import (
         AgentSigningDelegationRecord,
+        KeyEventAccessLogRecord,
+        KeyLifecycleEventRecord,
         OrganizationKidNamespaceRecord,
         OrganizationMemberRecord,
         OrganizationRecord,
@@ -87,6 +89,8 @@ def _build_network_app(database_url: str):
         OrganizationKidNamespaceRecord,
         AgentSigningDelegationRecord,
         OrganizationMemberRecord,
+        KeyLifecycleEventRecord,
+        KeyEventAccessLogRecord,
     )
 
 

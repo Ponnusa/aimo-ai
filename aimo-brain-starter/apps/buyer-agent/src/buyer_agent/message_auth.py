@@ -20,14 +20,17 @@ from message_integrity import (
     HttpJwksResolver,
     ProofError,
     VerifiedProof,
+    build_acceptance_receipt,
+    build_rejection_receipt,
     private_key_from_pem,
 )
 from message_integrity import sign_artifact as _sign_artifact
 from message_integrity import verify_artifact_proof_with_delegation as _verify_artifact_proof
+from message_integrity.proofs import parse_unverified_proof
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from buyer_agent.models import BuyerSeenMessageProofRecord
+from buyer_agent.models import BuyerSeenMessageProofRecord, BuyerVerificationEvidenceReceiptRecord
 from buyer_agent.registry_client import (
     RegistryDiscoveryError,
     verify_agent_is_registered_and_related,
@@ -103,9 +106,24 @@ async def verify_inbound_artifact(
             protocol_version=settings.aimo_protocol_version,
         )
     except ProofError as exc:
+        # M8 slice 3 (ADR-018 section 2): a rejection still produces an
+        # evidence receipt -- a dispute may turn on "was this rejected
+        # for a reason that later became moot." Every field here is
+        # named claimed_* precisely because nothing was cryptographically
+        # confirmed.
+        await _record_evidence_receipt(
+            session_factory, build_rejection_receipt(artifact, reason=str(exc))
+        )
         raise MessageAuthenticationError(f"Message proof rejected: {exc}") from exc
 
+    proof = artifact.get("proof") or {}
+    header, _ = parse_unverified_proof(proof["jws"])
+    kid_used = header.get("kid", "")
+
     await _record_seen_or_reject_replay(session_factory, verified)
+    await _record_evidence_receipt(
+        session_factory, build_acceptance_receipt(verified, kid_used=kid_used)
+    )
 
     try:
         await verify_agent_is_registered_and_related(
@@ -146,6 +164,33 @@ async def _record_seen_or_reject_replay(
             raise MessageAuthenticationError(
                 f"Replayed message proof jti={verified.jti!r}."
             ) from exc
+
+
+async def _record_evidence_receipt(session_factory: async_sessionmaker, receipt) -> None:
+    """M8 slice 3 (ADR-018 section 2). Never raises on its own -- a
+    receipt-recording failure must not itself become the reason an
+    otherwise-valid verification result is rejected, nor silently mask
+    a real rejection (callers already call this before/after raising
+    as appropriate)."""
+    async with session_factory() as session:
+        session.add(
+            BuyerVerificationEvidenceReceiptRecord(
+                jti=receipt.jti,
+                artifact_digest=receipt.artifact_digest,
+                kid_used=receipt.kid_used,
+                claimed_artifact_digest=receipt.claimed_artifact_digest,
+                claimed_kid=receipt.claimed_kid,
+                delegated_kid=receipt.delegated_kid,
+                organization_id=receipt.organization_id,
+                agent_id=receipt.agent_id,
+                artifact_type=receipt.artifact_type,
+                attribution=receipt.attribution,
+                verification_outcome=receipt.verification_outcome,
+                rejection_reason=receipt.rejection_reason,
+                observed_at=receipt.observed_at,
+            )
+        )
+        await session.commit()
 
 
 __all__ = ["MessageAuthenticationError", "sign_outbound_artifact", "verify_inbound_artifact"]

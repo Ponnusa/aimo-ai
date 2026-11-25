@@ -25,7 +25,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-from message_integrity.jwks import JwksResolver
+from message_integrity.jwks import JwksResolver, KeyNotFoundError
 
 ALGORITHM = "EdDSA"
 DEFAULT_VALIDITY_SECONDS = 600
@@ -92,6 +92,15 @@ class VerifiedProof:
     #: "legacy" (no explicit ``typ``, or PyJWT's old default ``"JWT"``)
     #: or "v1" (the new explicit ``ARTIFACT_TYP`` discriminator).
     typ_version: str = "legacy"
+    #: The artifact's own ``artifact_digest`` claim (M8 slice 3, ADR-018)
+    #: -- already computed and checked internally during verification;
+    #: exposed here so a caller building a :class:`VerificationEvidenceReceiptRecord`
+    #: never has to recompute it, and so a receipt can bind to this
+    #: one-way digest without ever touching the artifact's own payload
+    #: (which may carry a bearer credential, per ADR-011) in a form that
+    #: could be recovered later -- a SHA-256 digest is one-way by
+    #: construction, so storing it can never leak that credential.
+    artifact_digest: str = ""
 
 
 def canonicalize(data: dict[str, Any]) -> str:
@@ -300,6 +309,7 @@ def verify_artifact_proof_with_known_key(
         expires_at=claims["exp"],
         attribution=attribution,
         typ_version=typ_version,
+        artifact_digest=expected_digest,
     )
 
 
@@ -335,7 +345,18 @@ async def verify_artifact_proof(
         public_key: Ed25519PublicKey = await jwks_resolver.get_key(
             organization_id=issuer_organization_id, kid=kid
         )
-    except Exception as exc:  # KeyNotFoundError or a resolver-specific failure
+    except KeyNotFoundError as exc:
+        # Deliberately narrow (M8 slice 3 merge-review correction,
+        # mirroring the identical fix in message_integrity.delegations):
+        # KeyNotFoundError is the one semantic "no currently-valid key
+        # with this kid" signal every JwksResolver raises. A blanket
+        # ``except Exception`` here used to also catch a genuine
+        # infrastructure failure of the JWKS fetch itself (network-api
+        # unreachable, a timeout, a malformed response) and relabel it
+        # as an ordinary signature-verification failure, destroying the
+        # distinction between "this key is invalid" and "we could not
+        # check." Any other exception now propagates with its real
+        # cause intact.
         raise InvalidSignatureError(f"Could not resolve signing key: {exc}") from exc
 
     return verify_artifact_proof_with_known_key(
