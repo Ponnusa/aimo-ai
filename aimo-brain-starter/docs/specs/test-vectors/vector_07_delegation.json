@@ -1,0 +1,77 @@
+{
+  "description": "M8 slice 2 (ADR-017) delegation vector: organization org_vector_buyer_01 delegates signing authority for the 'quote'/'request_for_quote' artifact types, protocol version v1, to agent agent_vector_buyer_01's own key (org_vector_buyer_01-agent01-k1). A conformant implementation must: (1) verify 'delegation_jws' against 'root_public_key_jwk' and recover 'expected_delegation_claims'; (2) verify 'signed_artifact' against the delegation's own delegated_pubkey_jwk (never against the root key) and recover 'expected_verified_claims', with attribution='delegated_agent' and typ_version='v1'. iat/exp are fixed, far-future values so this vector never expires.",
+  "network_audience": "aimo-network:vector-test",
+  "root_public_key_jwk": {
+    "kty": "OKP",
+    "crv": "Ed25519",
+    "kid": "org_vector_buyer_01-root-k1",
+    "x": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+    "use": "sig",
+    "alg": "EdDSA"
+  },
+  "delegation_jws": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZ192ZWN0b3JfYnV5ZXJfMDEtcm9vdC1rMSIsInR5cCI6ImFpbW8tZGVsZWdhdGlvbitqd3MifQ.eyJpc3MiOiJvcmdfdmVjdG9yX2J1eWVyXzAxIiwic3ViIjoiYWdlbnRfdmVjdG9yX2J1eWVyXzAxIiwiYXVkIjoiYWltby1uZXR3b3JrOnZlY3Rvci10ZXN0IiwianRpIjoianRpX2RlbGVnYXRpb25fdmVjdG9yX2ZpeGVkXzAxIiwiaWF0IjoxNzAwMDAwMDAwLCJuYmYiOjE3MDAwMDAwMDAsImV4cCI6NDAwMDAwMDAwMCwiZGVsZWdhdGVkX2tpZCI6Im9yZ192ZWN0b3JfYnV5ZXJfMDEtYWdlbnQwMS1rMSIsImRlbGVnYXRlZF9wdWJrZXlfandrIjp7Imt0eSI6Ik9LUCIsImNydiI6IkVkMjU1MTkiLCJraWQiOiJvcmdfdmVjdG9yX2J1eWVyXzAxLWFnZW50MDEtazEiLCJ4IjoiZFZ4TXVTVnNwODNFclAzR3otN2FoSkFYNWJuNVVVNlpHUnZXZmdzTlFuWSIsInVzZSI6InNpZyIsImFsZyI6IkVkRFNBIn0sInNjb3BlIjp7ImFydGlmYWN0X3R5cGVzIjpbInJlcXVlc3RfZm9yX3F1b3RlIiwicXVvdGUiXSwicHJvdG9jb2xfdmVyc2lvbiI6InYxIn19.-uExhBJzPtpLYGih-FvTj2kz_aNbKlHxLPQWhGVPzngyIxtLgZ5yoGHuXvVaQySiyVrORzu01LbF685wM6_WBA",
+  "expected_delegation_claims": {
+    "iss": "org_vector_buyer_01",
+    "sub": "agent_vector_buyer_01",
+    "aud": "aimo-network:vector-test",
+    "jti": "jti_delegation_vector_fixed_01",
+    "iat": 1700000000,
+    "nbf": 1700000000,
+    "exp": 4000000000,
+    "delegated_kid": "org_vector_buyer_01-agent01-k1",
+    "delegated_pubkey_jwk": {
+      "kty": "OKP",
+      "crv": "Ed25519",
+      "kid": "org_vector_buyer_01-agent01-k1",
+      "x": "dVxMuSVsp83ErP3Gz-7ahJAX5bn5UU6ZGRvWfgsNQnY",
+      "use": "sig",
+      "alg": "EdDSA"
+    },
+    "scope": {
+      "artifact_types": [
+        "request_for_quote",
+        "quote"
+      ],
+      "protocol_version": "v1"
+    }
+  },
+  "expected_recipient_organization_id": "org_vector_supplier_01",
+  "signed_artifact": {
+    "artifact_id": "art_delegation_vector_01",
+    "transaction_id": "txn_delegation_vector_01",
+    "correlation_id": "corr_delegation_vector_01",
+    "sender_agent_id": "agent_vector_buyer_01",
+    "recipient_agent_id": "agent_vector_supplier_01",
+    "organization_id": "org_vector_buyer_01",
+    "type": "quote",
+    "version": 1,
+    "payload": {
+      "lines": [
+        {
+          "product_ref": "sku_0003",
+          "quantity": "7"
+        }
+      ]
+    },
+    "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85",
+    "proof": {
+      "alg": "EdDSA",
+      "kid": "org_vector_buyer_01-agent01-k1",
+      "jws": "eyJhbGciOiJFZERTQSIsImtpZCI6Im9yZ192ZWN0b3JfYnV5ZXJfMDEtYWdlbnQwMS1rMSIsInR5cCI6ImFpbW8tYXJ0aWZhY3QrandzIn0.eyJpc3MiOiJvcmdfdmVjdG9yX2J1eWVyXzAxIiwic3ViIjoiYWdlbnRfdmVjdG9yX2J1eWVyXzAxIiwiYXVkIjoib3JnX3ZlY3Rvcl9zdXBwbGllcl8wMSIsIm5lZyI6InR4bl9kZWxlZ2F0aW9uX3ZlY3Rvcl8wMSIsInR5cCI6InF1b3RlIiwidmVyIjoxLCJoYXNoIjoiZTNiMGM0NDI5OGZjMWMxNDlhZmJmNGM4OTk2ZmI5MjQyN2FlNDFlNDY0OWI5MzRjYTQ5NTk5MWI3ODUyYjg1IiwiYXJ0aWZhY3RfZGlnZXN0IjoiNjcxZWNjZWQ4OWYzOTA0MDIxYmI3NGY5MDBmNTM0YmI2ZmM2OGYzNTZkODVmNWFjNjczMzA1ZGY3MGE2NmI4OSIsImp0aSI6Imp0aV9kZWxlZ2F0aW9uX3ZlY3Rvcl9hcnRpZmFjdF8wMSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjo0MDAwMDAwMDAwfQ.oc-UZEpUKIZK_RlzrEBstY-RBmX1_UqgY8RFv8JW-BqCGVE200d5LRc5__N3ivNHCNskurBaMsrp4N47-hrSDg"
+    }
+  },
+  "expected_verified_claims": {
+    "organization_id": "org_vector_buyer_01",
+    "agent_id": "agent_vector_buyer_01",
+    "recipient_organization_id": "org_vector_supplier_01",
+    "negotiation_id": "txn_delegation_vector_01",
+    "artifact_type": "quote",
+    "version": 1,
+    "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85",
+    "jti": "jti_delegation_vector_artifact_01",
+    "issued_at": 1700000000,
+    "expires_at": 4000000000,
+    "attribution": "delegated_agent",
+    "typ_version": "v1"
+  }
+}

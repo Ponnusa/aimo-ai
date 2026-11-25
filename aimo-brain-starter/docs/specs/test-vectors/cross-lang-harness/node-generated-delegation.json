@@ -1,0 +1,39 @@
+{
+  "description": "A delegation AND the artifact it covers, both signed ENTIRELY by the Node.js cross-language harness (generate-delegation.mjs), for the Python reference implementation to verify — proving the Node.js -> Python direction of delegation interoperability.",
+  "organization_id": "org_node_generated_delegation_01",
+  "network_audience": "aimo-network:node-generated-test",
+  "root_public_key_jwk": {
+    "kty": "OKP",
+    "crv": "Ed25519",
+    "kid": "org_node_generated_delegation_01-root-k1",
+    "x": "4otMmm2cgjDjFm2tTtpemGzh6Ovri4ngQrzvCHB40Mc",
+    "use": "sig",
+    "alg": "EdDSA"
+  },
+  "delegation_jws": "eyJ0eXAiOiJhaW1vLWRlbGVnYXRpb24randzIiwiYWxnIjoiRWREU0EiLCJraWQiOiJvcmdfbm9kZV9nZW5lcmF0ZWRfZGVsZWdhdGlvbl8wMS1yb290LWsxIn0.eyJpc3MiOiJvcmdfbm9kZV9nZW5lcmF0ZWRfZGVsZWdhdGlvbl8wMSIsInN1YiI6ImFnZW50X25vZGVfZ2VuZXJhdGVkX2RlbGVnYXRpb25fMDEiLCJhdWQiOiJhaW1vLW5ldHdvcms6bm9kZS1nZW5lcmF0ZWQtdGVzdCIsImp0aSI6Imp0aV9ub2RlX2dlbmVyYXRlZF9kZWxlZ2F0aW9uXzAxIiwiaWF0IjoxNzAwMDAwMDAwLCJuYmYiOjE3MDAwMDAwMDAsImV4cCI6NDAwMDAwMDAwMCwiZGVsZWdhdGVkX2tpZCI6Im9yZ19ub2RlX2dlbmVyYXRlZF9kZWxlZ2F0aW9uXzAxLWFnZW50MDEtazEiLCJkZWxlZ2F0ZWRfcHVia2V5X2p3ayI6eyJrdHkiOiJPS1AiLCJjcnYiOiJFZDI1NTE5Iiwia2lkIjoib3JnX25vZGVfZ2VuZXJhdGVkX2RlbGVnYXRpb25fMDEtYWdlbnQwMS1rMSIsIngiOiJ3ZTRSR2ZjOENsWkIzXzBkSnFMdkd1VDZjVWVLdmFQT25PalZfS0J2dVA4IiwidXNlIjoic2lnIiwiYWxnIjoiRWREU0EifSwic2NvcGUiOnsiYXJ0aWZhY3RfdHlwZXMiOlsicmVxdWVzdF9mb3JfcXVvdGUiLCJxdW90ZSJdLCJwcm90b2NvbF92ZXJzaW9uIjoidjEifX0.yeTUts_s0dhWhSRbiVLzDEwr7F0Wq8IWu6ixR_oXzveP18UR3WcFT48i6hyxrEpCedRzha45N_a6AxBazKvlDw",
+  "expected_recipient_organization_id": "org_vector_supplier_01",
+  "signed_artifact": {
+    "artifact_id": "art_node_generated_delegation_01",
+    "transaction_id": "txn_node_generated_delegation_01",
+    "correlation_id": "corr_node_generated_delegation_01",
+    "sender_agent_id": "agent_node_generated_delegation_01",
+    "recipient_agent_id": "agent_vector_supplier_01",
+    "organization_id": "org_node_generated_delegation_01",
+    "type": "quote",
+    "version": 1,
+    "payload": {
+      "lines": [
+        {
+          "product_ref": "sku_0004",
+          "quantity": "3"
+        }
+      ]
+    },
+    "content_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b85",
+    "proof": {
+      "alg": "EdDSA",
+      "kid": "org_node_generated_delegation_01-agent01-k1",
+      "jws": "eyJ0eXAiOiJhaW1vLWFydGlmYWN0K2p3cyIsImFsZyI6IkVkRFNBIiwia2lkIjoib3JnX25vZGVfZ2VuZXJhdGVkX2RlbGVnYXRpb25fMDEtYWdlbnQwMS1rMSJ9.eyJpc3MiOiJvcmdfbm9kZV9nZW5lcmF0ZWRfZGVsZWdhdGlvbl8wMSIsInN1YiI6ImFnZW50X25vZGVfZ2VuZXJhdGVkX2RlbGVnYXRpb25fMDEiLCJhdWQiOiJvcmdfdmVjdG9yX3N1cHBsaWVyXzAxIiwibmVnIjoidHhuX25vZGVfZ2VuZXJhdGVkX2RlbGVnYXRpb25fMDEiLCJ0eXAiOiJxdW90ZSIsInZlciI6MSwiaGFzaCI6ImUzYjBjNDQyOThmYzFjMTQ5YWZiZjRjODk5NmZiOTI0MjdhZTQxZTQ2NDliOTM0Y2E0OTU5OTFiNzg1MmI4NSIsImFydGlmYWN0X2RpZ2VzdCI6IjA2MGZkOWViN2I5MmYzODJhYWExMTllZjMyMzU3YmIyZDdhY2Y3Mzg4NGNkYmVhZjI3ODM5MGUzZWY1OWNlMzUiLCJqdGkiOiJqdGlfbm9kZV9nZW5lcmF0ZWRfZGVsZWdhdGlvbl9hcnRpZmFjdF8wMSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjo0MDAwMDAwMDAwfQ._FUG7hDwNMycRmg47RMV1SkFFN2C9um9nLTHch2gRmWyN7fEx9QKJTpGj5wgcqZN5UFiorOZ-GmsepPxp4tUBQ"
+    }
+  }
+}

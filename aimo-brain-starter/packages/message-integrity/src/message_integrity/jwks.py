@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import httpx
@@ -35,7 +36,9 @@ class KeyNotFoundError(Exception):
 
 class JwksResolver(ABC):
     @abstractmethod
-    async def get_key(self, *, organization_id: str, kid: str) -> Ed25519PublicKey: ...
+    async def get_key(
+        self, *, organization_id: str, kid: str, force_fresh: bool = False
+    ) -> Ed25519PublicKey: ...
 
     @abstractmethod
     def invalidate(self, organization_id: str) -> None: ...
@@ -59,7 +62,9 @@ class HttpJwksResolver(JwksResolver):
         network_api_url: str,
         cache_ttl_seconds: float = 300.0,
         http_client: httpx.AsyncClient | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        self._clock = clock
         self._network_api_url = network_api_url.rstrip("/")
         self._cache_ttl_seconds = cache_ttl_seconds
         self._http_client = http_client
@@ -88,10 +93,18 @@ class HttpJwksResolver(JwksResolver):
                 continue
         return keys
 
-    async def get_key(self, *, organization_id: str, kid: str) -> Ed25519PublicKey:
+    async def get_key(
+        self, *, organization_id: str, kid: str, force_fresh: bool = False
+    ) -> Ed25519PublicKey:
+        """Fail-closed, always (M8 slice 2, ADR-017): a cache entry is
+        never served past its TTL, and a refresh failure on an expired
+        entry propagates as a failure — it never falls back to
+        last-known-good data. ``force_fresh`` (required for
+        commitment-adjacent artifact types) bypasses the cache
+        entirely, even when the cached entry is still within its TTL."""
         entry = self._cache.get(organization_id)
-        now = time.monotonic()
-        if entry is None or (now - entry.fetched_at) > self._cache_ttl_seconds:
+        now = self._clock()
+        if force_fresh or entry is None or (now - entry.fetched_at) > self._cache_ttl_seconds:
             keys = await self._fetch(organization_id)
             entry = _CacheEntry(keys=keys, fetched_at=now)
             self._cache[organization_id] = entry
@@ -129,7 +142,9 @@ class InMemoryJwksResolver(JwksResolver):
     def invalidate(self, organization_id: str) -> None:
         return None
 
-    async def get_key(self, *, organization_id: str, kid: str) -> Ed25519PublicKey:
+    async def get_key(
+        self, *, organization_id: str, kid: str, force_fresh: bool = False
+    ) -> Ed25519PublicKey:
         key = self._keys.get((organization_id, kid))
         if key is None:
             raise KeyNotFoundError(

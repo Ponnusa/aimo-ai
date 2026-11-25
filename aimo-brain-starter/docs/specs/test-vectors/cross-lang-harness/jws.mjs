@@ -11,6 +11,11 @@ import {
 } from "node:crypto";
 import { canonicalize } from "./canonicalize.mjs";
 
+// M8 slice 2 (ADR-017) domain-separation header values -- see
+// docs/specs/jws-artifact-signatures.md section 3b.
+export const ARTIFACT_TYP = "aimo-artifact+jws";
+export const DELEGATION_TYP = "aimo-delegation+jws";
+
 export function digestHex(artifactWithoutProof) {
   const canonical = canonicalize(artifactWithoutProof);
   const hex = createHash("sha256").update(canonical, "utf8").digest("hex");
@@ -43,9 +48,13 @@ export function publicKeyToJwk(publicKey, kid) {
   return { kty: "OKP", crv: "Ed25519", kid, x: jwk.x, use: "sig", alg: "EdDSA" };
 }
 
-/** Section 3a, steps 1-8. */
-export function signJws(claims, { privateKey, kid }) {
-  const header = { typ: "JWT", alg: "EdDSA", kid };
+/** Section 3a, steps 1-8. `typ` defaults to "JWT" (the legacy header
+ * value every pre-M8-slice-2 artifact carries) for backward
+ * compatibility with this harness's existing vectors; M8 slice 2
+ * callers pass the explicit discriminator (ARTIFACT_TYP/DELEGATION_TYP
+ * below) instead. */
+export function signJws(claims, { privateKey, kid, typ = "JWT" }) {
+  const header = { typ, alg: "EdDSA", kid };
   const encodedHeader = b64url(Buffer.from(JSON.stringify(header), "utf8"));
   const encodedPayload = b64url(Buffer.from(JSON.stringify(claims), "utf8"));
   const signingInput = Buffer.from(`${encodedHeader}.${encodedPayload}`, "ascii");
@@ -56,9 +65,28 @@ export function signJws(claims, { privateKey, kid }) {
 
 export class JwsVerificationError extends Error {}
 
+/** Decode (without verifying) a token's header and payload -- used to
+ * inspect `typ` before deciding which verification path applies (M8
+ * slice 2 domain separation), mirroring
+ * message_integrity.proofs.parse_unverified_proof. */
+export function decodeUnverified(token) {
+  const parts = token.split(".");
+  if (parts.length !== 3) throw new JwsVerificationError("Malformed JWS: expected 3 segments.");
+  const [encodedHeader, encodedPayload] = parts;
+  const header = JSON.parse(b64urlDecode(encodedHeader).toString("utf8"));
+  const claims = JSON.parse(b64urlDecode(encodedPayload).toString("utf8"));
+  return { header, claims };
+}
+
 /** Section 4, steps 1-7 (minus key resolution, which the caller does --
- * this harness uses a plain object map, not a live JWKS fetch). */
-export function verifyJws(token, { resolvePublicKey, expectedAudience }) {
+ * this harness uses a plain object map, not a live JWKS fetch).
+ * `expectedTyp` (M8 slice 2): when provided, enforces domain
+ * separation -- "legacy" accepts an absent typ or "JWT" (pre-slice-2
+ * artifacts), "v1" requires exactly ARTIFACT_TYP, "delegation"
+ * requires exactly DELEGATION_TYP; any mismatch (in particular,
+ * presenting a delegation token where an artifact is expected, or
+ * vice versa) is rejected before the signature is even checked. */
+export function verifyJws(token, { resolvePublicKey, expectedAudience, expectedTyp }) {
   const parts = token.split(".");
   if (parts.length !== 3) throw new JwsVerificationError("Malformed JWS: expected 3 segments.");
   const [encodedHeader, encodedPayload, encodedSignature] = parts;
@@ -73,6 +101,15 @@ export function verifyJws(token, { resolvePublicKey, expectedAudience }) {
 
   if (header.alg !== "EdDSA") {
     throw new JwsVerificationError(`Unsupported alg ${header.alg}; only EdDSA is accepted.`);
+  }
+  if (expectedTyp === "legacy" && header.typ !== undefined && header.typ !== "JWT") {
+    throw new JwsVerificationError(`Unexpected typ ${header.typ}; expected legacy (absent or "JWT").`);
+  }
+  if (expectedTyp === "v1" && header.typ !== ARTIFACT_TYP) {
+    throw new JwsVerificationError(`Unexpected typ ${header.typ}; expected ${ARTIFACT_TYP}.`);
+  }
+  if (expectedTyp === "delegation" && header.typ !== DELEGATION_TYP) {
+    throw new JwsVerificationError(`Unexpected typ ${header.typ}; expected ${DELEGATION_TYP}.`);
   }
   const kid = header.kid;
   const issuer = claims.iss;

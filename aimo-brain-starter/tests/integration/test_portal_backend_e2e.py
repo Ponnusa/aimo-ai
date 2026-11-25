@@ -72,6 +72,8 @@ def _build_network_app(database_url: str):
     import network_api.app as network_app_module
     import network_api.settings as network_settings_module
     from network_api.models import (
+        AgentSigningDelegationRecord,
+        OrganizationKidNamespaceRecord,
         OrganizationMemberRecord,
         OrganizationRecord,
         OrganizationSigningKeyRecord,
@@ -79,7 +81,13 @@ def _build_network_app(database_url: str):
 
     network_settings_module.get_settings.cache_clear()
     app = network_app_module.create_app()
-    return app, (OrganizationRecord, OrganizationSigningKeyRecord, OrganizationMemberRecord)
+    return app, (
+        OrganizationRecord,
+        OrganizationSigningKeyRecord,
+        OrganizationKidNamespaceRecord,
+        AgentSigningDelegationRecord,
+        OrganizationMemberRecord,
+    )
 
 
 def _build_buyer_app(database_url: str, buyer_a2a_url: str, network_api_url: str):
