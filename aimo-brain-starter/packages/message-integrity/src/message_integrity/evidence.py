@@ -19,6 +19,22 @@ receipt can never let something merely CLAIMED by an unverified,
 possibly-forged message be confused with something that was actually
 cryptographically resolved and verified. This is the exact distinction
 ADR-018 section 1's historical-evidence report also depends on.
+
+**Disclosed explicitly, confirmed by reading ``proofs._artifact_digest``:
+``artifact_digest`` identifies the artifact's CONTENT only** (a SHA-256
+over the canonicalized artifact with its ``proof`` field removed) --
+it does not depend in any way on which key, ``kid``, or delegation
+actually signed that content. Two different valid signatures over the
+exact same artifact content (two different delegated keys, or a root
+key versus a delegated key) produce the IDENTICAL ``artifact_digest``.
+**The digest alone cannot distinguish "which proof was checked" from
+"which content was checked."** ``kid_used``/``delegated_kid`` are what
+actually identify which signature was verified; it is the COMBINATION
+of ``artifact_digest`` (content) and ``kid_used``/``delegated_kid``
+(signer), never the digest by itself, that disambiguates a substituted
+proof (the same content, re-signed by a different, equally-valid key)
+from a genuinely re-sent, identical proof. Any consumer of this receipt
+for evidentiary purposes must read both fields together.
 """
 
 from __future__ import annotations

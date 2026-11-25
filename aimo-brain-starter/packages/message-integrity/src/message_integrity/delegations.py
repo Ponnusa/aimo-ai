@@ -33,7 +33,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-from message_integrity.jwks import JwksResolver
+from message_integrity.jwks import JwksResolver, KeyNotFoundError
 from message_integrity.keys import jwk_thumbprint, public_key_from_jwk, validate_ed25519_public_jwk
 from message_integrity.proofs import ALGORITHM, DELEGATION_TYP, InvalidSignatureError, ProofError
 
@@ -183,7 +183,29 @@ async def verify_delegation_token(
         root_public_key = await jwks_resolver.get_key(
             organization_id=organization_id, kid=issuing_kid, force_fresh=force_fresh
         )
-    except Exception as exc:  # KeyNotFoundError or a resolver-specific failure
+    except KeyNotFoundError as exc:
+        # Deliberately narrow (merge-review correction): this is the
+        # ONE semantic "no currently-valid key with this kid" signal
+        # every JwksResolver implementation raises (root-cutover,
+        # revocation, expiry, or a kid that never existed) -- it is
+        # correct and intended for this to be treated as "this one
+        # delegation is no longer valid" by HttpDelegationResolver's
+        # per-token catch. A blanket ``except Exception`` here used to
+        # ALSO catch a genuine infrastructure failure of the root-JWKS
+        # fetch itself (network-api unreachable, timeout, malformed
+        # response -- httpx-level exceptions, not KeyNotFoundError),
+        # silently converting an outage into "this delegation doesn't
+        # exist." That is a dangerous fail-open-by-omission: a resolver
+        # whose every delegation happens to be signed under roots
+        # reachable only through the same down endpoint would return an
+        # EMPTY delegation list, indistinguishable from "this
+        # organization genuinely has no delegations," instead of
+        # propagating a clearly-recoverable infrastructure error.
+        # Any other exception from ``get_key`` (network/infrastructure)
+        # now propagates unconverted, out of this function, out of
+        # ``HttpDelegationResolver._fetch`` (whose ``except ProofError``
+        # does not match a non-ProofError exception), and fails the
+        # whole delegation lookup closed with its real cause intact.
         raise InvalidSignatureError(
             f"Could not resolve the delegation's issuing root key: {exc}"
         ) from exc

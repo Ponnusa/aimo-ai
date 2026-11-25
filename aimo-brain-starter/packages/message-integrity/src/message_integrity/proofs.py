@@ -25,7 +25,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-from message_integrity.jwks import JwksResolver
+from message_integrity.jwks import JwksResolver, KeyNotFoundError
 
 ALGORITHM = "EdDSA"
 DEFAULT_VALIDITY_SECONDS = 600
@@ -345,7 +345,18 @@ async def verify_artifact_proof(
         public_key: Ed25519PublicKey = await jwks_resolver.get_key(
             organization_id=issuer_organization_id, kid=kid
         )
-    except Exception as exc:  # KeyNotFoundError or a resolver-specific failure
+    except KeyNotFoundError as exc:
+        # Deliberately narrow (M8 slice 3 merge-review correction,
+        # mirroring the identical fix in message_integrity.delegations):
+        # KeyNotFoundError is the one semantic "no currently-valid key
+        # with this kid" signal every JwksResolver raises. A blanket
+        # ``except Exception`` here used to also catch a genuine
+        # infrastructure failure of the JWKS fetch itself (network-api
+        # unreachable, a timeout, a malformed response) and relabel it
+        # as an ordinary signature-verification failure, destroying the
+        # distinction between "this key is invalid" and "we could not
+        # check." Any other exception now propagates with its real
+        # cause intact.
         raise InvalidSignatureError(f"Could not resolve signing key: {exc}") from exc
 
     return verify_artifact_proof_with_known_key(
