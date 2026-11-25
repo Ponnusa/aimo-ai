@@ -408,6 +408,17 @@ def create_app() -> FastAPI:
                 )
 
             existing = await session.get(RegistryAgentRecord, body.agent_id)
+            if existing is not None:
+                import sys as _sys
+
+                print(
+                    f"[DIAG] unexpected existing row for agent_id={body.agent_id!r}: "
+                    f"org={existing.organization_id!r} status={existing.status!r} "
+                    f"classification={existing.agent_classification!r} "
+                    f"has_key={existing.signing_public_key_jwk is not None} "
+                    f"registered_at={existing.registered_at!r}",
+                    file=_sys.stderr,
+                )
             if existing is not None and existing.organization_id != body.organization_id:
                 raise HTTPException(
                     status_code=409,
