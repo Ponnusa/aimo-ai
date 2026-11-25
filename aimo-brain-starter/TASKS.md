@@ -229,6 +229,20 @@ Claude Code: check an item only after its implementation and verification are co
 
 ## M8
 - [ ] External BYOA interoperability test
+  - [x] Cross-language JWS artifact-signature specification (`docs/specs/jws-artifact-signatures.md`), corrected for RFC 8785 disclaiming, the real `typ` protected-header claim, exact signing-input bytes, Unicode/NaN/duplicate-key handling (ADR-016), with committed signed test vectors (`docs/specs/test-vectors/`) including Unicode-content and duplicate-key-rejection cases, cross-checked against the Python reference implementation (`packages/message-integrity/tests/test_jws_vectors.py`)
+  - [x] Independent Node.js cross-language conformance harness (`docs/specs/test-vectors/cross-lang-harness/`, zero AIMO-package/npm dependencies) proving Python ↔ Node.js interoperability in both directions (ADR-016) — **not** proof of interoperability with any other language
+  - [x] Private-key-control challenge at `registry-api` agent registration, additive to the existing endpoint-ownership challenge, with separate purpose-bound challenges for endpoint vs. key control (ADR-015/ADR-016)
+  - [x] Mandatory key-control proof for organizations explicitly classified "external" by a registry operator (new `POST /organizations/{id}/classification`, authenticated by a distinct `registry_admin_token`, never settable by the registering organization itself) (ADR-016)
+  - [x] Atomic (conditional-`UPDATE`-based) first-key-establishment and challenge-consumption, closing the concurrent-registration and concurrent-confirm races found in review (ADR-016)
+  - [x] Enforced agent lifecycle transition table: no resurrection of `revoked` agents via re-registration, no `suspended`→`active` via re-registration, `/reactivate` only from `suspended` (ADR-016)
+  - [ ] **Blocking release gate, not optional:** registry-api's organization authentication still trusts a shared-HMAC credential's claimed `organization_id` with no independent ownership check — a stronger registry-authentication mechanism is required before any real, untrusted external organization is allowed to drive its own registration calls (ADR-016, "Registry authentication boundary"). Do not onboard a real external organization until this is closed.
+  - [x] PostgreSQL verification of the registry-api migration and new concurrency-sensitive code — confirmed via review-branch CI run [45662672905](https://github.com/Ponnusa/aimo-ai/actions/runs/45662672905) at commit `a673360`, 8/8 jobs green against real Postgres, including both concurrency-race tests and the migration's upgrade/downgrade (ADR-016)
+  - [ ] **Follow-up:** add an explicitly-named PostgreSQL foreign-key flush-ordering regression test for `registry-api`'s `register_agent` (covers the `ForeignKeyViolation` found and fixed during M8 slice 1 remediation — a missing `session.flush()` between the agent-row insert and its capability-row inserts; currently only incidentally covered by other Postgres-backed registration tests, not by a test naming this specific invariant)
+  - [ ] Per-agent delegated signing keys chained to an organization root (today's keys remain organization-level, per ADR-012/ADR-015)
+  - [ ] Key rotation endpoint requiring the current key's signature to authorize a new one
+  - [ ] Historical signing-key archive for after-the-fact audit verification of a since-rotated key
+  - [ ] Published OpenAPI contract + "AIMO Trust Extension" capability descriptor for external agents
+  - [ ] Independent, non-Python reference agent exercising the full RFQ→quote→accept→authorization→commit cycle with no internal package/database access
 - [ ] Containerized self-hosted deployment guide
 - [ ] Construction RFQ schema without core changes
 - [ ] Load, disaster recovery and operational runbooks

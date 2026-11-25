@@ -73,10 +73,53 @@ class VerifiedProof:
 
 def canonicalize(data: dict[str, Any]) -> str:
     """Deterministic JSON serialization: sorted keys, no incidental
-    whitespace. Reused verbatim as ``trade_protocol.negotiation.
-    canonicalize_terms`` so the whole codebase has exactly one
-    canonicalization rule, never two slightly different ones."""
-    return json.dumps(data, sort_keys=True, separators=(",", ":"))
+    whitespace, standard-JSON-only numbers. Reused verbatim as
+    ``trade_protocol.negotiation.canonicalize_terms`` so the whole
+    codebase has exactly one canonicalization rule, never two slightly
+    different ones -- see ``docs/specs/jws-artifact-signatures.md`` for
+    the full, language-neutral specification of this rule, including
+    why it is a deliberate, documented deviation from RFC 8785 rather
+    than an attempt to implement it.
+
+    ``allow_nan=False`` (M8, ADR-015 section F): Python's ``json.dumps``
+    otherwise happily emits the non-standard tokens ``NaN``/``Infinity``/
+    ``-Infinity`` for those float values, which no conformant JSON
+    parser in another language accepts -- silently producing bytes that
+    could never have round-tripped across languages anyway. No
+    previously-valid artifact has ever legitimately contained one of
+    these (every monetary/quantity value is a decimal *string*, never a
+    JSON number -- docs/PROTOCOLS.md rule 2), so turning this into an
+    explicit, immediate :class:`ValueError` changes no existing valid
+    artifact's digest; it only replaces a silent interoperability break
+    with a loud one for inputs that were never valid to begin with."""
+    return json.dumps(data, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    seen: set[str] = set()
+    for key, _ in pairs:
+        if key in seen:
+            raise ValueError(f"Duplicate JSON key {key!r} is not permitted in a signed artifact.")
+        seen.add(key)
+    return dict(pairs)
+
+
+def strict_json_loads(text: str) -> dict[str, Any]:
+    """Parse ``text`` as a JSON object, rejecting duplicate keys (M8,
+    ADR-015 section F) -- a bare ``json.loads`` silently keeps only the
+    last occurrence, which is a known class of canonicalization
+    ambiguity (two parties' parsers could disagree on which value a
+    duplicated key "really" held). :func:`canonicalize` itself takes an
+    already-parsed Python ``dict`` -- which, being a Python dict, cannot
+    contain a duplicate key by construction -- so this function matters
+    only to a caller that deserializes untrusted *raw JSON text* into an
+    artifact before canonicalizing/verifying it. Nothing in this
+    codebase currently does that (every artifact arrives as an
+    already-structured object via the A2A SDK's protobuf ``Struct``,
+    which has no "duplicate key" concept at all); this helper exists so
+    any *future* raw-JSON transport inherits strict parsing by
+    construction rather than by someone remembering to write it."""
+    return json.loads(text, object_pairs_hook=_reject_duplicate_keys)
 
 
 def _normalize_numbers(value: Any) -> Any:
@@ -229,5 +272,6 @@ __all__ = [
     "VerifiedProof",
     "canonicalize",
     "sign_artifact",
+    "strict_json_loads",
     "verify_artifact_proof",
 ]

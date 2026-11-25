@@ -11,6 +11,7 @@ dependencies = [
   "alembic>=1.13.2",
   "database",
   "identity",
+  "message-integrity",
   "a2a-sdk[http-server,fastapi]==1.3.0",
   "httpx>=0.27.2",
 ]

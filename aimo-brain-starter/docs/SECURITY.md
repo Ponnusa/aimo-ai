@@ -304,6 +304,70 @@ further out, against a genuinely separate system/database — but this is
 a defense-in-depth property of the sandbox, not something AIMO BRAIN
 depends on a real supplier system to provide.
 
+## M8 slice 1: registration identity trust model and residual limitations
+
+**Endpoint control and private-key control are two distinct, sequentially
+enforced proofs, never conflated.** `apps/registry-api`'s existing
+endpoint-ownership challenge (M2, test case 6/7 above) proves a registrant
+controls the URL named by its Agent Card; it proves nothing about a
+signing identity. The new `signing_public_key_jwk` path proves a
+registrant controls the Ed25519 private key matching a specific public
+key, via a signature over a challenge bound to that exact purpose
+(`purpose: "key-control"`), organization, agent, and key thumbprint — a
+signature produced for one purpose is rejected if presented for the
+other (test case 32 below), and neither proof is ever treated as
+satisfying the other.
+
+**Mandatory key-control for an "external"-classified organization is a
+server-held fact, never a caller-selectable one.** Classification lives
+in a table only an operator-held, distinct secret (`registry_admin_token`
+— never derived from, and never interchangeable with,
+`service_credential_signing_secret`) can write. An organization's own
+`manage_agents` credential cannot classify itself, and no field in the
+registration request body expresses classification at all.
+
+**This mandatory-key-proof mechanism is not, by itself, a safe external-
+onboarding authentication boundary.** `require_org_bearer`'s shared-HMAC
+scheme still authenticates every registration call, and registry-api
+still performs no independent check that the organization named in a
+verified credential is the organization that credential was actually
+meant for — that trust is placed entirely in `network-api`'s own
+credential-issuance path, outside this slice's scope. **Real external
+onboarding — an untrusted, independently-operated organization placing
+its own registration calls — remains blocked on a stronger registry-
+authentication mechanism than the current shared HMAC secret, which must
+never be distributed to any organization.** See `docs/DECISIONS.md`
+ADR-016's "Registry authentication boundary" section and `TASKS.md`'s M8
+section for this stated as a named release gate, not an optional
+hardening task.
+
+**Registration and verification are both closed against the two
+concurrency races that mattered.** Two simultaneous first-time key
+registrations for the same agent, and two simultaneous verification
+confirmations for the same agent, are each resolved by a conditional
+`UPDATE` whose `WHERE` clause re-checks the precondition at the moment of
+the write (test cases 30/31) — never by an unlocked read followed by an
+unconditional write, which the review that preceded this revision found
+would otherwise let a race through.
+
+**Lifecycle transitions are enforced, not merely documented.** A
+`revoked` agent cannot be resurrected by re-registration; a `suspended`
+agent cannot become `active` except through an explicit `/reactivate`
+call; `/reactivate` itself only succeeds from `suspended`, never from
+`pending` (test cases 33–35) — see `docs/DECISIONS.md` ADR-016 for the
+full transition table.
+
+**Known, explicitly accepted gaps carried forward by this slice:**
+key-reuse-across-agents detection is a plain query, not a race-safe CAS
+(accepted — a race here is an audit-hygiene annoyance, not an identity
+hijack); non-integer floating-point numbers in a canonicalized artifact
+remain formally undefined (`docs/specs/jws-artifact-signatures.md`
+section 2e); cross-language JWS interoperability is proven for Python ↔
+Node.js only, not for any other language; this slice's migration and
+concurrency-sensitive code have not yet been verified against real
+PostgreSQL (pending an approved CI run, not claimed as done — see
+ADR-016).
+
 **Supplier-side reconciliation is real, not a documented gap.**
 `apps/worker`'s supplier role (previously a no-op, per M5.1/ADR-012)
 now retries `supplier_orders` rows stuck in `RECONCILIATION_REQUIRED`
@@ -356,3 +420,22 @@ production access exists anywhere in this codebase, per `CLAUDE.md`.
     its true resolved state (`CONFIRMED`/`FAILED`) without re-submitting
     it, and a second reconciliation cycle against an already-resolved
     order is a no-op.
+30. Two concurrent first-time signing-key registrations for the same
+    agent cannot both succeed — exactly one wins, the other receives a
+    deterministic conflict, and the key is never silently overwritten.
+31. Two concurrent verification confirmations for the same agent cannot
+    both activate it — a verification challenge cannot be consumed more
+    than once.
+32. A signature over the endpoint-control challenge cannot be presented
+    as proof of key control, and vice versa — the two proofs are bound
+    to distinct, purpose-tagged challenges that are never
+    interchangeable.
+33. A `revoked` agent cannot be reactivated, directly or indirectly,
+    through ordinary re-registration.
+34. A `suspended` agent cannot become `active` through ordinary
+    re-registration, and `/reactivate` only succeeds when the agent is
+    currently `suspended` (never from `pending`).
+35. An organization not explicitly classified "external" by a registry
+    operator can register an agent without a signing key (unchanged
+    M0-M7 behavior); an organization explicitly classified "external"
+    cannot register an agent without one, and cannot classify itself.

@@ -144,6 +144,7 @@ def _build_registry_app(*, database_url: str, network_api_url: str):
         RegistryAgentCapabilityRecord,
         RegistryAgentRecord,
         RegistryAuditEventRecord,
+        RegistryOrganizationPolicyRecord,
     )
 
     os.environ["REGISTRY_DATABASE_URL"] = database_url
@@ -154,7 +155,12 @@ def _build_registry_app(*, database_url: str, network_api_url: str):
     registry_settings_module.get_settings.cache_clear()
 
     app = registry_app_module.create_app()
-    return app, (RegistryAgentRecord, RegistryAgentCapabilityRecord, RegistryAuditEventRecord)
+    return app, (
+        RegistryAgentRecord,
+        RegistryAgentCapabilityRecord,
+        RegistryAuditEventRecord,
+        RegistryOrganizationPolicyRecord,
+    )
 
 
 def _build_supplier_mcp_app(*, database_url: str):
@@ -302,7 +308,7 @@ async def _register_and_verify_agent(
             params={"organization_id": organization_id},
             headers={"Authorization": f"Bearer {token}"},
         )
-        challenge = start.json()["challenge"]
+        challenge = start.json()["endpoint_challenge"]
 
         await client.put(
             f"{agent_server.base_url}/internal/ownership-challenge",

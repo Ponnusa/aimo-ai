@@ -62,6 +62,22 @@ class RegistryApiSettings(ServiceSettings):
         validation_alias="REGISTRY_VERIFICATION_CHALLENGE_TTL_SECONDS",
     )
 
+    # Operator-only secret (M8, ADR-015). Authenticates ONLY the
+    # /organizations/{id}/classification endpoint, which flags an
+    # organization as "external" (signing-key-mandatory onboarding).
+    # This must NEVER be distributed to any organization, including the
+    # one being classified -- it is a distinct secret from
+    # service_credential_signing_secret, which every organization already
+    # holds a scoped credential derived from. See ADR-015 section E: real
+    # self-service external onboarding remains blocked until a stronger
+    # registry-authentication mechanism replaces the shared HMAC scheme
+    # entirely; this admin token is an interim, operator-driven control,
+    # not that replacement.
+    registry_admin_token: str = Field(
+        default="dev-only-registry-admin-token-change-me",
+        validation_alias="REGISTRY_ADMIN_TOKEN",
+    )
+
 
 @lru_cache
 def get_settings() -> RegistryApiSettings:
