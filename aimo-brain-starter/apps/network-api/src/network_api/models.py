@@ -174,13 +174,23 @@ class AgentSigningDelegationRecord(Base):
     __tablename__ = "agent_signing_delegations"
     __table_args__ = (
         UniqueConstraint("organization_id", "delegated_kid", name="uq_org_delegated_kid"),
+        # M8 slice 3 (ADR-018): a row stops blocking its key's thumbprint
+        # from reuse when EITHER it is explicitly revoked (for cause,
+        # unchanged since M8 slice 2) OR its reservation has been
+        # separately released (routine expiry + grace period, via
+        # ``thumbprint_reservation_released_at`` -- never by converting
+        # expiry into a revocation, which would conflate two different
+        # lifecycle meanings). Both conditions independently free the
+        # slot; neither implies the other.
         Index(
             "uq_org_live_pubkey_thumbprint",
             "organization_id",
             "pubkey_thumbprint",
             unique=True,
-            postgresql_where=text("revoked_at IS NULL"),
-            sqlite_where=text("revoked_at IS NULL"),
+            postgresql_where=text(
+                "revoked_at IS NULL AND thumbprint_reservation_released_at IS NULL"
+            ),
+            sqlite_where=text("revoked_at IS NULL AND thumbprint_reservation_released_at IS NULL"),
         ),
     )
 
@@ -200,3 +210,81 @@ class AgentSigningDelegationRecord(Base):
     not_after: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: M8 slice 3 (ADR-018 section 5): deliberately SEPARATE from
+    #: ``revoked_at``. Set only by the reservation-release job, once a
+    #: delegation is past ``not_after`` plus a configured grace period
+    #: -- this is "the slot is free to be reused by a different agent,"
+    #: never "this delegation was revoked for cause." Backfilled NULL
+    #: (slot held) for every pre-existing row -- never backfilled as
+    #: already-released, which would be exactly the silent-free failure
+    #: this design forbids.
+    thumbprint_reservation_released_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
+
+
+class KeyLifecycleEventRecord(Base):
+    """Append-only ledger of every root-key and delegation lifecycle
+    event (M8 slice 3, ADR-018 section 3) -- the one legitimate source
+    for historical-evidence queries. Retains the full key material or
+    delegation token itself (``key_material``), not just a status flag,
+    so a historical artifact can actually be re-verified cryptographically
+    against period-correct material, not merely have its status looked
+    up.
+
+    Two timestamps, not one: ``effective_time`` is when the event
+    semantically took effect (a key's own ``not_after`` for an expiry
+    event; the moment an operator chose for a revocation); ``recorded_at``
+    is when THIS service's own process appended the row, which can
+    legitimately be later -- a cleanup job may notice an expiry well
+    after it actually happened. Nothing updates or deletes a row here
+    once written; this service's own code never issues an UPDATE or
+    DELETE against this table (enforced at the application layer --
+    see ``docs/DECISIONS.md`` ADR-018 for the stated limitation that
+    this is a trusted-operator record, not a tamper-proof external
+    timestamping authority).
+
+    A ``migration_snapshot`` event describes only CURRENT state as
+    observed at migration time -- it is never a reconstructed historical
+    ``issued``/``revoked`` event with a backdated timestamp."""
+
+    __tablename__ = "key_lifecycle_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    organization_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    kid: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    #: "root" or "delegated" -- which keyspace this event is about.
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    #: "issued" | "rotating" | "expired" | "revoked" | "reservation_released" | "migration_snapshot"
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    effective_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    #: The full public-key JWK (root) or the full signed delegation JWS
+    #: (delegated) -- retained permanently so a historical artifact can
+    #: still be cryptographically re-verified after this key/delegation
+    #: is no longer live.
+    key_material: Mapped[str] = mapped_column(Text, nullable=False)
+    #: True only for a ``migration_snapshot`` row -- the historical-
+    #: evidence evaluator must never treat this event as reaching any
+    #: time before ``recorded_at``.
+    is_reconstructed_snapshot: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class KeyEventAccessLogRecord(Base):
+    """Who queried which organization's historical key-event ledger,
+    and when (M8 slice 3, ADR-018 section 3) -- the sensitivity of
+    historical evidence justifies knowing who has been looking at it,
+    independent of the admin-key boundary that already gates the read
+    itself."""
+
+    __tablename__ = "key_event_access_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    queried_organization_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    queried_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    #: This reference deployment authenticates every admin-boundary call
+    #: with one shared global key (unchanged pre-existing limitation,
+    #: ADR-016's same class of issue) -- so this can only ever record
+    #: "the admin boundary was used," never a specific caller identity.
+    #: Named here plainly rather than implying a stronger guarantee.
+    caller_identifier: Mapped[str] = mapped_column(String, nullable=False, default="admin")

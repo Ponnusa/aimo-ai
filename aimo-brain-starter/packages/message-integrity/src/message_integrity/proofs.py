@@ -92,6 +92,15 @@ class VerifiedProof:
     #: "legacy" (no explicit ``typ``, or PyJWT's old default ``"JWT"``)
     #: or "v1" (the new explicit ``ARTIFACT_TYP`` discriminator).
     typ_version: str = "legacy"
+    #: The artifact's own ``artifact_digest`` claim (M8 slice 3, ADR-018)
+    #: -- already computed and checked internally during verification;
+    #: exposed here so a caller building a :class:`VerificationEvidenceReceiptRecord`
+    #: never has to recompute it, and so a receipt can bind to this
+    #: one-way digest without ever touching the artifact's own payload
+    #: (which may carry a bearer credential, per ADR-011) in a form that
+    #: could be recovered later -- a SHA-256 digest is one-way by
+    #: construction, so storing it can never leak that credential.
+    artifact_digest: str = ""
 
 
 def canonicalize(data: dict[str, Any]) -> str:
@@ -300,6 +309,7 @@ def verify_artifact_proof_with_known_key(
         expires_at=claims["exp"],
         attribution=attribution,
         typ_version=typ_version,
+        artifact_digest=expected_digest,
     )
 
 

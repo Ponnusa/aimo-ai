@@ -76,6 +76,8 @@ def _build_network_app(*, database_url: str):
     import network_api.settings as network_settings_module
     from network_api.models import (
         AgentSigningDelegationRecord,
+        KeyEventAccessLogRecord,
+        KeyLifecycleEventRecord,
         OrganizationKidNamespaceRecord,
         OrganizationRecord,
         OrganizationSigningKeyRecord,
@@ -95,6 +97,8 @@ def _build_network_app(*, database_url: str):
         OrganizationSigningKeyRecord,
         OrganizationKidNamespaceRecord,
         AgentSigningDelegationRecord,
+        KeyLifecycleEventRecord,
+        KeyEventAccessLogRecord,
     )
 
 
@@ -176,6 +180,7 @@ def _build_supplier_app(
         SupplierProposalRecord,
         SupplierSeenMessageProofRecord,
         SupplierTaskRecord,
+        SupplierVerificationEvidenceReceiptRecord,
     )
 
     os.environ["SUPPLIER_A2A_URL"] = a2a_url
@@ -207,6 +212,7 @@ def _build_supplier_app(
         SupplierOrderRecord,
         SupplierOrderReconciliationEventRecord,
         SupplierSeenMessageProofRecord,
+        SupplierVerificationEvidenceReceiptRecord,
         SupplierActivePolicyPointerRecord,
         SupplierApprovalDecisionRecord,
     )
@@ -234,6 +240,7 @@ def _build_buyer_app(
         BuyerProposalRecord,
         BuyerSeenMessageProofRecord,
         BuyerTaskRecord,
+        BuyerVerificationEvidenceReceiptRecord,
     )
 
     os.environ["BUYER_A2A_URL"] = a2a_url
@@ -260,6 +267,7 @@ def _build_buyer_app(
         BuyerOrderRecord,
         BuyerOrderReconciliationEventRecord,
         BuyerSeenMessageProofRecord,
+        BuyerVerificationEvidenceReceiptRecord,
         BuyerActivePolicyPointerRecord,
         BuyerApprovalDecisionRecord,
     )
