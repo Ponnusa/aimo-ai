@@ -1405,22 +1405,40 @@ def create_app() -> FastAPI:
 
     @app.get("/organizations/{organization_id}/key-events.json", response_model=KeyEventsListOut)
     async def get_key_events(
-        organization_id: str, x_admin_key: str | None = Header(default=None)
+        organization_id: str,
+        x_admin_key: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
     ) -> KeyEventsListOut:
         """The append-only historical-evidence ledger (M8 slice 3,
         ADR-018 section 3) -- never used by, or reachable from, this
-        service's live JWKS/delegations endpoints above. Gated by the
-        same admin-key boundary as other organization-management calls,
-        plus its own access log: the sensitivity of historical evidence
-        justifies knowing who has been looking at it, independent of
-        the (unchanged, still global) admin-key boundary itself."""
-        _require_admin(x_admin_key, expected=settings.network_admin_api_key)
+        service's live JWKS/delegations endpoints above. Authority
+        resolved per-organization (ADR-019 section 1): a
+        ``legacy_global_key`` organization's global key continues to
+        work unchanged; an ``org_scoped_credential`` organization reads
+        its OWN key/delegation lifecycle history with its own
+        ``read_key_events``-scoped credential -- there is no reason to
+        withhold an organization's own history from it -- and the
+        global key is rejected outright. The access log still records
+        who looked, independent of which authority they used, since the
+        sensitivity of historical evidence justifies knowing who has
+        been looking at it regardless of boundary."""
         async with session_factory() as session:
+            await _resolve_org_authority(
+                session,
+                organization_id=organization_id,
+                required_scope="read_key_events",
+                x_admin_key=x_admin_key,
+                authorization=authorization,
+                settings=settings,
+            )
+            caller_identifier = (
+                "admin" if x_admin_key is not None else f"org_credential:{organization_id}"
+            )
             session.add(
                 KeyEventAccessLogRecord(
                     queried_organization_id=organization_id,
                     queried_at=datetime.now(UTC).replace(tzinfo=None),
-                    caller_identifier="admin",
+                    caller_identifier=caller_identifier,
                 )
             )
             await session.commit()
@@ -1558,10 +1576,27 @@ def create_app() -> FastAPI:
 
     @app.get("/organizations/{organization_id}/members", response_model=list[MemberOut])
     async def list_members(
-        organization_id: str, x_admin_key: str | None = Header(default=None)
+        organization_id: str,
+        x_admin_key: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
     ) -> list[MemberOut]:
-        _require_admin(x_admin_key, expected=settings.network_admin_api_key)
+        """Authority resolved per-organization (ADR-019 section 1), same
+        as the mutating member endpoints: a ``legacy_global_key``
+        organization's global key continues to work unchanged; an
+        ``org_scoped_credential`` organization reads its own member
+        list with its own ``read_members``-scoped credential, and the
+        global key is rejected outright. This closes the omission
+        found in this ADR's own matrix -- previously this one read-only
+        route stayed global-admin-key-only regardless of auth_mode."""
         async with session_factory() as session:
+            await _resolve_org_authority(
+                session,
+                organization_id=organization_id,
+                required_scope="read_members",
+                x_admin_key=x_admin_key,
+                authorization=authorization,
+                settings=settings,
+            )
             rows = (
                 (
                     await session.execute(
@@ -1626,13 +1661,32 @@ def create_app() -> FastAPI:
     async def set_oidc_mapping(
         organization_id: str,
         body: OidcMappingIn,
-        x_admin_key: str | None = Header(default=None),
+        x_operator_key: str | None = Header(default=None),
     ) -> OidcMappingOut:
         """Bind this organization to exactly one identity-provider
         tenant. The portal resolves a logged-in human's organization
         from this mapping (issuer + tenant id from the validated ID
-        token), never from an email domain."""
-        _require_admin(x_admin_key, expected=settings.network_admin_api_key)
+        token), never from an email domain.
+
+        Deliberately gated by the operator/recovery authority (ADR-019
+        section 3), not by ``auth_mode`` resolution, and NOT by the
+        legacy global admin key either -- for ANY organization,
+        legacy-hosted or external alike. This is platform-level
+        configuration (which identity-provider tenant an organization's
+        humans sign in through), set once when AIMO itself provisions a
+        hosted organization's IdP tenant -- never an organization's own
+        self-service action, and structurally meaningless for an
+        externally-hosted ``org_scoped_credential`` organization, which
+        has no AIMO portal session to resolve in the first place. No
+        org-scoped credential scope exists for this action, and the
+        legacy global key -- previously sufficient here for every
+        organization -- is no longer accepted: this tightens, rather
+        than preserves, legacy behavior, because nothing about this
+        action was ever meant to be reachable by the general-purpose
+        admin key rather than the narrower platform-operator one. There
+        is no production traffic to break by this change (reference
+        deployment, pre-external-onboarding)."""
+        _require_operator(x_operator_key, expected=settings.network_operator_key)
         async with session_factory() as session:
             org = await session.get(OrganizationRecord, organization_id)
             if org is None:

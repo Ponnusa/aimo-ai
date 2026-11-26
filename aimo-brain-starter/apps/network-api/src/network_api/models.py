@@ -60,10 +60,12 @@ AUTH_MODES = ("legacy_global_key", "org_scoped_credential")
 #: absent from this set and unreachable via any credential carrying it.
 ORG_ADMIN_CREDENTIAL_SCOPES = (
     "manage_members",
+    "read_members",
     "issue_service_credentials",
     "rotate_signing_keys",
     "publish_delegations",
     "revoke_delegations",
+    "read_key_events",
 )
 
 

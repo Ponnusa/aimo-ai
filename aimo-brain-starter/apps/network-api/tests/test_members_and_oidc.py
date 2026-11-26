@@ -141,7 +141,7 @@ async def test_oidc_mapping_set_and_resolve_by_tenant() -> None:
                 "oidc_issuer": "https://login.microsoftonline.com/tenant-a/v2.0",
                 "oidc_tenant_id": "tenant-a",
             },
-            headers={"X-Admin-Key": settings.network_admin_api_key},
+            headers={"X-Operator-Key": settings.network_operator_key},
         )
         assert set_response.status_code == 200
 
