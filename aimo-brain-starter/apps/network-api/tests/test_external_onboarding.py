@@ -607,3 +607,78 @@ async def test_recovery_revert_to_legacy_is_explicit_and_audited(monkeypatch) ->
         assert "bootstrapped_external" in event_types
         assert "recovery_revert_to_legacy" in event_types
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_both_credential_headers_present_simultaneously_global_key_ignored(
+    monkeypatch,
+) -> None:
+    """Merge-review addition: the literal scenario behind acceptance test
+    2's name -- a single request carrying BOTH a valid X-Admin-Key header
+    AND an Authorization bearer header at once, against an
+    org_scoped_credential organization. `_resolve_org_authority` only
+    ever inspects `authorization` once `auth_mode` resolves to
+    "org_scoped_credential" -- `x_admin_key` is never read at all in that
+    branch, so a valid global key offered alongside a missing/garbage
+    bearer cannot tip the outcome. This is distinct from, and not proven
+    by, `test_mixed_credential_org_a_cannot_act_on_org_b` above (which
+    tests cross-organization credential misuse, not simultaneous dual
+    headers on one request)."""
+    monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
+    app, engine, settings = await _fresh_app_with_orgs("org_both_headers")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await _bootstrap_external(client, settings, "org_both_headers")
+        response = await client.post(
+            "/organizations/org_both_headers/service-credentials",
+            json={"ttl_seconds": 60},
+            headers={
+                "X-Admin-Key": settings.network_admin_api_key,
+                "Authorization": "Bearer not-a-real-credential",
+            },
+        )
+    assert response.status_code == 401
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_self_service_rotation_is_audited(monkeypatch) -> None:
+    """Merge-review addition: self-service rotation produced no audit
+    record at all before this fix, unlike bootstrap/force-revoke/revert
+    -- a real gap against ADR-019 section 2's own "every
+    issuance/rotation/revocation produces an audit record" requirement."""
+    monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
+    app, engine, settings = await _fresh_app_with_orgs("org_rotation_audit")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        secret = await _bootstrap_external(client, settings, "org_rotation_audit")
+        response = await client.post(
+            "/organizations/org_rotation_audit/admin-credential/rotate",
+            headers={"Authorization": f"Bearer {secret}"},
+        )
+        assert response.status_code == 200, response.text
+
+    from network_api.models import OrganizationLifecycleAuditEventRecord
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        events = (
+            (
+                await session.execute(
+                    select(OrganizationLifecycleAuditEventRecord).where(
+                        OrganizationLifecycleAuditEventRecord.organization_id
+                        == "org_rotation_audit"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        event_types = {e.event_type for e in events}
+        assert "self_rotated" in event_types
+        # The raw secret must never appear in the audit trail's own detail text.
+        for e in events:
+            assert secret not in e.detail
+    await engine.dispose()

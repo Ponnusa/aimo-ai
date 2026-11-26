@@ -546,6 +546,15 @@ def create_app() -> FastAPI:
                     created_at=now,
                 )
             )
+            session.add(
+                OrganizationLifecycleAuditEventRecord(
+                    organization_id=organization_id,
+                    event_type="self_rotated",
+                    detail="Admin credential self-rotated by the organization; prior "
+                    "credential revoked in the same transaction.",
+                    created_at=now,
+                )
+            )
             await session.commit()
         return AdminCredentialRotateOut(
             organization_id=organization_id, admin_credential=new_secret
