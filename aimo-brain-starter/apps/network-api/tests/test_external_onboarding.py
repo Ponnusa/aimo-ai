@@ -15,6 +15,7 @@ from network_api.app import create_app
 from network_api.models import OrganizationAdminCredentialRecord, OrganizationRecord
 from network_api.settings import get_settings
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from database import Base, new_engine
 
@@ -700,363 +701,263 @@ async def test_self_service_rotation_is_audited(monkeypatch) -> None:
 # platform-level IdP-tenant configuration, never an organization's own
 # self-service action, and was never meant to be reachable by the
 # general-purpose admin key either.
+#
+# Each route's six required scenarios (external global-key rejection,
+# authorized access, wrong scope, cross-organization access, mixed
+# credentials, missing/unknown auth_mode -- fewer for oidc-mapping, which has
+# no scope concept) are consolidated into ONE test function per route,
+# sharing a single ``create_app()``/engine/client across every scenario
+# (multiple pre-seeded organizations provide the isolation between
+# scenarios, not separate app instances). This is deliberate, not a coverage
+# reduction: every individual assertion below is unchanged from an earlier,
+# one-scenario-per-test draft of this fix. Consolidating was required
+# because each ``create_app()`` call creates its own internal SQLAlchemy
+# engine that is never disposed in this test style (``ASGITransport`` never
+# runs the ASGI lifespan that would trigger that engine's own ``dispose()``
+# -- a pre-existing property of every test in this file and this whole
+# suite, not something this fix introduced). That leak is real and
+# systemic, not unique to this fix, but the first (one-test-per-scenario)
+# draft added 16 more leaking engines on top of everything the rest of the
+# suite already leaks, which reproducibly exhausted PostgreSQL's
+# ``max_connections`` partway through CI's full-suite run -- confirmed by
+# two consecutive identical CI failures, always the same nine
+# ``registry-api`` tests, always the same "too many clients already" error.
+# Fixing the underlying leak for the whole suite (every test file that
+# calls ``create_app()``) is a real, separate piece of work, named here
+# rather than silently patched around -- out of scope for this fix, which
+# only closes the three-endpoint authorization gap. Consolidating down to
+# three new engines total (one per route) is the scoped, honest mitigation:
+# it keeps every required scenario covered while not meaningfully adding to
+# a leak this fix did not create.
 
 
 @pytest.mark.asyncio
-async def test_list_members_global_key_rejected_for_external_org(monkeypatch) -> None:
-    """External global-key rejection for GET .../members."""
+async def test_list_members_route_authorization_matrix(monkeypatch) -> None:
+    """GET /organizations/{id}/members -- all six required scenarios,
+    one shared app/engine/client."""
     monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
-    app, engine, settings = await _fresh_app_with_orgs("org_members_read_a")
+    app, engine, settings = await _fresh_app_with_orgs(
+        "org_members_a", "org_members_c", "org_members_d", "org_members_e", "org_members_g"
+    )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        await _bootstrap_external(client, settings, "org_members_read_a")
-        response = await client.get(
-            "/organizations/org_members_read_a/members",
+        secret_a = await _bootstrap_external(client, settings, "org_members_a")
+        secret_c = await _bootstrap_external(client, settings, "org_members_c")
+        secret_d = await _bootstrap_external(client, settings, "org_members_d")
+        await _bootstrap_external(client, settings, "org_members_e")
+
+        # External global-key rejection.
+        rejected = await client.get(
+            "/organizations/org_members_a/members",
             headers={"X-Admin-Key": settings.network_admin_api_key},
         )
-    assert response.status_code == 401
-    await engine.dispose()
+        assert rejected.status_code == 401
 
-
-@pytest.mark.asyncio
-async def test_list_members_authorized_access_with_scoped_credential(monkeypatch) -> None:
-    """Authorized access: the org's own credential (granted the full
-    enumerated scope set at bootstrap, including ``read_members``) can
-    read its own member list."""
-    monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
-    app, engine, settings = await _fresh_app_with_orgs("org_members_read_b")
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        secret = await _bootstrap_external(client, settings, "org_members_read_b")
-        response = await client.get(
-            "/organizations/org_members_read_b/members",
-            headers={"Authorization": f"Bearer {secret}"},
+        # Authorized access via the org's own credential (granted the full
+        # enumerated scope set, including read_members, at bootstrap).
+        authorized = await client.get(
+            "/organizations/org_members_a/members", headers={"Authorization": f"Bearer {secret_a}"}
         )
-    assert response.status_code == 200
-    assert response.json() == []
-    await engine.dispose()
+        assert authorized.status_code == 200
+        assert authorized.json() == []
 
-
-@pytest.mark.asyncio
-async def test_list_members_wrong_scope_rejected(monkeypatch) -> None:
-    """Wrong scope: a credential record missing ``read_members`` from
-    its granted scope set is rejected even though it is otherwise a
-    valid, active credential for this exact organization."""
-    monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
-    app, engine, settings = await _fresh_app_with_orgs("org_members_read_c")
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        secret = await _bootstrap_external(client, settings, "org_members_read_c")
-
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with session_factory() as session:
-        record = (
-            await session.execute(
-                select(OrganizationAdminCredentialRecord).where(
-                    OrganizationAdminCredentialRecord.organization_id == "org_members_read_c"
-                )
-            )
-        ).scalar_one()
-        record.scopes_json = json.dumps(["manage_members"])  # read_members deliberately absent
-        await session.commit()
-
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
-            "/organizations/org_members_read_c/members",
-            headers={"Authorization": f"Bearer {secret}"},
-        )
-    assert response.status_code == 403
-    await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_list_members_cross_organization_rejected(monkeypatch) -> None:
-    """Cross-organization access: org A's credential cannot read org
-    B's member list."""
-    monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
-    app, engine, settings = await _fresh_app_with_orgs("org_members_read_d", "org_members_read_e")
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        secret_d = await _bootstrap_external(client, settings, "org_members_read_d")
-        await _bootstrap_external(client, settings, "org_members_read_e")
-        response = await client.get(
-            "/organizations/org_members_read_e/members",
-            headers={"Authorization": f"Bearer {secret_d}"},
-        )
-    assert response.status_code == 401
-    await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_list_members_mixed_credentials_auth_mode_decides(monkeypatch) -> None:
-    """Mixed credentials: both a global-key header and a (wrong-org)
-    scoped-credential header present on one request -- the organization's
-    own auth_mode alone decides which is evaluated; for an
-    org_scoped_credential organization only the scoped credential branch
-    is ever consulted, so a correct scoped credential succeeds and the
-    simultaneously-present global key is never even inspected."""
-    monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
-    app, engine, settings = await _fresh_app_with_orgs("org_members_read_f")
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        secret = await _bootstrap_external(client, settings, "org_members_read_f")
-        response = await client.get(
-            "/organizations/org_members_read_f/members",
+        # Mixed credentials: auth_mode alone decides which is evaluated --
+        # the correct scoped credential succeeds even with the (irrelevant)
+        # global key also present.
+        mixed = await client.get(
+            "/organizations/org_members_a/members",
             headers={
                 "X-Admin-Key": settings.network_admin_api_key,
-                "Authorization": f"Bearer {secret}",
+                "Authorization": f"Bearer {secret_a}",
             },
         )
-    # Succeeds because the org's auth_mode routes to the scoped-credential
-    # branch, which the correct credential satisfies -- not because the
-    # global key (also present) was honored.
-    assert response.status_code == 200
-    await engine.dispose()
+        assert mixed.status_code == 200
 
+        # Wrong scope: a credential missing read_members is rejected even
+        # though it is otherwise valid for this exact organization.
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            record = (
+                await session.execute(
+                    select(OrganizationAdminCredentialRecord).where(
+                        OrganizationAdminCredentialRecord.organization_id == "org_members_c"
+                    )
+                )
+            ).scalar_one()
+            record.scopes_json = json.dumps(["manage_members"])  # read_members absent
+            await session.commit()
+        wrong_scope = await client.get(
+            "/organizations/org_members_c/members", headers={"Authorization": f"Bearer {secret_c}"}
+        )
+        assert wrong_scope.status_code == 403
 
-@pytest.mark.asyncio
-async def test_list_members_unknown_auth_mode_denies(monkeypatch) -> None:
-    """Missing/unknown auth_mode denies, never defaults to legacy."""
-    app, engine, settings = await _fresh_app_with_orgs("org_members_read_g")
-    from sqlalchemy.ext.asyncio import async_sessionmaker
+        # Cross-organization access: org D's credential cannot read org E's
+        # member list.
+        cross_org = await client.get(
+            "/organizations/org_members_e/members", headers={"Authorization": f"Bearer {secret_d}"}
+        )
+        assert cross_org.status_code == 401
 
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with session_factory() as session:
-        org = await session.get(OrganizationRecord, "org_members_read_g")
-        org.auth_mode = "garbage"
-        await session.commit()
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
-            "/organizations/org_members_read_g/members",
+        # Missing/unknown auth_mode denies, never defaults to legacy.
+        async with session_factory() as session:
+            org = await session.get(OrganizationRecord, "org_members_g")
+            org.auth_mode = "garbage"
+            await session.commit()
+        unknown_mode = await client.get(
+            "/organizations/org_members_g/members",
             headers={"X-Admin-Key": settings.network_admin_api_key},
         )
-    assert response.status_code == 403
+        assert unknown_mode.status_code == 403
     await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_key_events_global_key_rejected_for_external_org(monkeypatch) -> None:
-    """External global-key rejection for GET .../key-events.json."""
+async def test_key_events_route_authorization_matrix(monkeypatch) -> None:
+    """GET /organizations/{id}/key-events.json -- all six required
+    scenarios, one shared app/engine/client, plus the access-log
+    attribution check."""
     monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
-    app, engine, settings = await _fresh_app_with_orgs("org_events_a")
+    app, engine, settings = await _fresh_app_with_orgs(
+        "org_events_a", "org_events_c", "org_events_d", "org_events_e", "org_events_g"
+    )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        await _bootstrap_external(client, settings, "org_events_a")
-        response = await client.get(
+        secret_a = await _bootstrap_external(client, settings, "org_events_a")
+        secret_c = await _bootstrap_external(client, settings, "org_events_c")
+        secret_d = await _bootstrap_external(client, settings, "org_events_d")
+        await _bootstrap_external(client, settings, "org_events_e")
+
+        # External global-key rejection.
+        rejected = await client.get(
             "/organizations/org_events_a/key-events.json",
             headers={"X-Admin-Key": settings.network_admin_api_key},
         )
-    assert response.status_code == 401
-    await engine.dispose()
+        assert rejected.status_code == 401
 
-
-@pytest.mark.asyncio
-async def test_key_events_authorized_access_logs_org_credential_caller(monkeypatch) -> None:
-    """Authorized access: the org's own credential reads its own
-    key-event history, and the access log records the org-credential
-    caller distinctly from an "admin" (global-key) caller."""
-    monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
-    app, engine, settings = await _fresh_app_with_orgs("org_events_b")
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        secret = await _bootstrap_external(client, settings, "org_events_b")
-        response = await client.get(
-            "/organizations/org_events_b/key-events.json",
-            headers={"Authorization": f"Bearer {secret}"},
+        # Authorized access -- and the access log attributes it to the org
+        # credential, distinctly from an "admin" (global-key) caller.
+        authorized = await client.get(
+            "/organizations/org_events_a/key-events.json",
+            headers={"Authorization": f"Bearer {secret_a}"},
         )
-    assert response.status_code == 200
+        assert authorized.status_code == 200
 
-    from network_api.models import KeyEventAccessLogRecord
-    from sqlalchemy.ext.asyncio import async_sessionmaker
+        from network_api.models import KeyEventAccessLogRecord
 
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with session_factory() as session:
-        log_rows = (
-            (
-                await session.execute(
-                    select(KeyEventAccessLogRecord).where(
-                        KeyEventAccessLogRecord.queried_organization_id == "org_events_b"
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            log_rows = (
+                (
+                    await session.execute(
+                        select(KeyEventAccessLogRecord).where(
+                            KeyEventAccessLogRecord.queried_organization_id == "org_events_a"
+                        )
                     )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
+        assert len(log_rows) == 1
+        assert log_rows[0].caller_identifier == "org_credential:org_events_a"
+
+        # Mixed credentials: auth_mode alone decides which is evaluated.
+        mixed = await client.get(
+            "/organizations/org_events_a/key-events.json",
+            headers={
+                "X-Admin-Key": settings.network_admin_api_key,
+                "Authorization": f"Bearer {secret_a}",
+            },
         )
-    assert len(log_rows) == 1
-    assert log_rows[0].caller_identifier == "org_credential:org_events_b"
-    await engine.dispose()
+        assert mixed.status_code == 200
 
-
-@pytest.mark.asyncio
-async def test_key_events_wrong_scope_rejected(monkeypatch) -> None:
-    """Wrong scope: a credential missing ``read_key_events`` is rejected."""
-    monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
-    app, engine, settings = await _fresh_app_with_orgs("org_events_c")
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        secret = await _bootstrap_external(client, settings, "org_events_c")
-
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with session_factory() as session:
-        record = (
-            await session.execute(
-                select(OrganizationAdminCredentialRecord).where(
-                    OrganizationAdminCredentialRecord.organization_id == "org_events_c"
+        # Wrong scope: a credential missing read_key_events is rejected.
+        async with session_factory() as session:
+            record = (
+                await session.execute(
+                    select(OrganizationAdminCredentialRecord).where(
+                        OrganizationAdminCredentialRecord.organization_id == "org_events_c"
+                    )
                 )
-            )
-        ).scalar_one()
-        record.scopes_json = json.dumps(["manage_members"])  # read_key_events deliberately absent
-        await session.commit()
-
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
+            ).scalar_one()
+            record.scopes_json = json.dumps(["manage_members"])  # read_key_events absent
+            await session.commit()
+        wrong_scope = await client.get(
             "/organizations/org_events_c/key-events.json",
-            headers={"Authorization": f"Bearer {secret}"},
+            headers={"Authorization": f"Bearer {secret_c}"},
         )
-    assert response.status_code == 403
-    await engine.dispose()
+        assert wrong_scope.status_code == 403
 
-
-@pytest.mark.asyncio
-async def test_key_events_cross_organization_rejected(monkeypatch) -> None:
-    """Cross-organization access: org A's credential cannot read org
-    B's key-event history."""
-    monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
-    app, engine, settings = await _fresh_app_with_orgs("org_events_d", "org_events_e")
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        secret_d = await _bootstrap_external(client, settings, "org_events_d")
-        await _bootstrap_external(client, settings, "org_events_e")
-        response = await client.get(
+        # Cross-organization access: org D's credential cannot read org E's
+        # key-event history.
+        cross_org = await client.get(
             "/organizations/org_events_e/key-events.json",
             headers={"Authorization": f"Bearer {secret_d}"},
         )
-    assert response.status_code == 401
-    await engine.dispose()
+        assert cross_org.status_code == 401
 
-
-@pytest.mark.asyncio
-async def test_key_events_mixed_credentials_auth_mode_decides(monkeypatch) -> None:
-    """Mixed credentials on GET .../key-events.json: auth_mode alone
-    decides which credential is evaluated."""
-    monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
-    app, engine, settings = await _fresh_app_with_orgs("org_events_f")
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        secret = await _bootstrap_external(client, settings, "org_events_f")
-        response = await client.get(
-            "/organizations/org_events_f/key-events.json",
-            headers={
-                "X-Admin-Key": settings.network_admin_api_key,
-                "Authorization": f"Bearer {secret}",
-            },
-        )
-    assert response.status_code == 200
-    await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_key_events_unknown_auth_mode_denies(monkeypatch) -> None:
-    """Missing/unknown auth_mode denies, never defaults to legacy."""
-    app, engine, settings = await _fresh_app_with_orgs("org_events_g")
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with session_factory() as session:
-        org = await session.get(OrganizationRecord, "org_events_g")
-        org.auth_mode = "garbage"
-        await session.commit()
-
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
+        # Missing/unknown auth_mode denies, never defaults to legacy.
+        async with session_factory() as session:
+            org = await session.get(OrganizationRecord, "org_events_g")
+            org.auth_mode = "garbage"
+            await session.commit()
+        unknown_mode = await client.get(
             "/organizations/org_events_g/key-events.json",
             headers={"X-Admin-Key": settings.network_admin_api_key},
         )
-    assert response.status_code == 403
+        assert unknown_mode.status_code == 403
     await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_oidc_mapping_global_key_no_longer_sufficient_for_any_org(monkeypatch) -> None:
-    """External global-key rejection for POST .../oidc-mapping -- and,
-    deliberately, this is also now true for a LEGACY organization: the
-    global key was never meant to reach platform-level IdP configuration,
-    only the narrower operator key."""
-    app, engine, settings = await _fresh_app_with_orgs("org_oidc_legacy")
+async def test_oidc_mapping_route_authorization_matrix(monkeypatch) -> None:
+    """POST /organizations/{id}/oidc-mapping -- all four applicable
+    scenarios (no scope concept applies to the operator-only model), one
+    shared app/engine/client."""
+    monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
+    app, engine, settings = await _fresh_app_with_orgs(
+        "org_oidc_legacy", "org_oidc_legacy2", "org_oidc_external"
+    )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
+        secret_external = await _bootstrap_external(client, settings, "org_oidc_external")
+
+        # External global-key rejection -- and, deliberately, this is also
+        # true for a LEGACY organization: the global key was never meant to
+        # reach platform-level IdP configuration, only the narrower
+        # operator key.
+        rejected = await client.post(
             "/organizations/org_oidc_legacy/oidc-mapping",
             json={"oidc_issuer": "https://example.com/tenant", "oidc_tenant_id": "tenant-x"},
             headers={"X-Admin-Key": settings.network_admin_api_key},
         )
-    assert response.status_code == 401
-    await engine.dispose()
+        assert rejected.status_code == 401
 
-
-@pytest.mark.asyncio
-async def test_oidc_mapping_authorized_access_via_operator_key(monkeypatch) -> None:
-    """Authorized access: the operator/recovery authority -- and only
-    that authority -- can set an organization's OIDC tenant mapping,
-    for a legacy-hosted organization (the ordinary, intended case)."""
-    app, engine, settings = await _fresh_app_with_orgs("org_oidc_legacy_ok")
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.post(
-            "/organizations/org_oidc_legacy_ok/oidc-mapping",
+        # Authorized access via the operator/recovery authority -- the
+        # ordinary, intended case for a legacy-hosted organization.
+        authorized = await client.post(
+            "/organizations/org_oidc_legacy/oidc-mapping",
             json={"oidc_issuer": "https://example.com/tenant", "oidc_tenant_id": "tenant-y"},
             headers={"X-Operator-Key": settings.network_operator_key},
         )
-    assert response.status_code == 200
-    await engine.dispose()
+        assert authorized.status_code == 200
 
-
-@pytest.mark.asyncio
-async def test_oidc_mapping_org_scoped_credential_cannot_write(monkeypatch) -> None:
-    """No org-scoped credential scope exists for this action -- an
-    external organization's own credential, even presented correctly,
-    cannot set its own OIDC mapping (structurally meaningless for it
-    anyway, since it has no AIMO portal session to resolve)."""
-    monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
-    app, engine, settings = await _fresh_app_with_orgs("org_oidc_external")
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        secret = await _bootstrap_external(client, settings, "org_oidc_external")
-        response = await client.post(
+        # No org-scoped-credential scope exists for this action -- an
+        # external organization's own credential, even presented correctly,
+        # cannot set its own OIDC mapping.
+        external_denied = await client.post(
             "/organizations/org_oidc_external/oidc-mapping",
             json={"oidc_issuer": "https://example.com/tenant", "oidc_tenant_id": "tenant-z"},
-            headers={"Authorization": f"Bearer {secret}"},
+            headers={"Authorization": f"Bearer {secret_external}"},
         )
-    # The org-scoped-credential bearer header is not even an accepted
-    # parameter on this endpoint -- FastAPI ignores unrecognized headers,
-    # so this is equivalent to presenting no credential at all.
-    assert response.status_code == 401
-    await engine.dispose()
+        assert external_denied.status_code == 401
 
-
-@pytest.mark.asyncio
-async def test_oidc_mapping_cross_organization_is_structurally_moot(monkeypatch) -> None:
-    """Cross-organization access is structurally moot for this route --
-    the operator key is not organization-bound at all (it IS the
-    platform operator, by design), so the only question is whether it
-    authenticates, not which org it claims. Confirm the operator key
-    legitimately sets mappings for two different organizations without
-    any cross-org check ever being relevant here."""
-    app, engine, settings = await _fresh_app_with_orgs("org_oidc_x", "org_oidc_y")
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        for org_id, tenant in (("org_oidc_x", "tenant-x2"), ("org_oidc_y", "tenant-y2")):
-            response = await client.post(
-                f"/organizations/{org_id}/oidc-mapping",
-                json={"oidc_issuer": f"https://example.com/{tenant}", "oidc_tenant_id": tenant},
-                headers={"X-Operator-Key": settings.network_operator_key},
-            )
-            assert response.status_code == 200
+        # Cross-organization access is structurally moot for this route --
+        # the operator key is not organization-bound at all, so confirm it
+        # legitimately sets mappings for two different organizations.
+        second_org = await client.post(
+            "/organizations/org_oidc_legacy2/oidc-mapping",
+            json={"oidc_issuer": "https://example.com/tenant2", "oidc_tenant_id": "tenant-x2"},
+            headers={"X-Operator-Key": settings.network_operator_key},
+        )
+        assert second_org.status_code == 200
     await engine.dispose()
