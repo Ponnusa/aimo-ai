@@ -15,6 +15,7 @@ dependencies = [
   "mcp-integration",
   "aimo-food-wholesale",
   "business-system-integration",
+  "agent-runtime",
 ]
 
 [build-system]
