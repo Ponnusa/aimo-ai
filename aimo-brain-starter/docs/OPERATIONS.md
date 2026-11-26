@@ -72,10 +72,14 @@ not Windows' default Proactor loop. Running Alembic directly hits this; it
 does not affect the deployed service itself, which runs on Linux. Work around
 it locally with:
 ```python
-import asyncio, sys
+import asyncio
+import sys
+
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 from alembic.config import main
+
 main(argv=["upgrade", "head"])
 ```
 
