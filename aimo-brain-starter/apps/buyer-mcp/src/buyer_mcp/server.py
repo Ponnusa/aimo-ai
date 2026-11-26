@@ -61,7 +61,14 @@ class PurchaseApprovalOut(BaseModel):
 def create_mcp_server(
     *, settings: BuyerMcpSettings, session_factory: async_sessionmaker
 ) -> FastMCP:
-    mcp = FastMCP(name="aimo-brain-buyer-mcp", streamable_http_path="/")
+    # host must match the Dockerfile's real `uvicorn --host 0.0.0.0` bind
+    # address. FastMCP defaults to assuming it's bound to loopback and
+    # self-applies a restrictive Host-header allowlist when it thinks so
+    # (DNS-rebinding protection) -- which then rejects every real caller,
+    # including a same-project private-network one, since the request's
+    # real Host header is never "127.0.0.1"/"localhost". Telling it the
+    # real bind host avoids that mismatch.
+    mcp = FastMCP(name="aimo-brain-buyer-mcp", streamable_http_path="/", host="0.0.0.0")
 
     async def _authorize(ctx: Context, *, tool_name: str) -> str:
         try:
