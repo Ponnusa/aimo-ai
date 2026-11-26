@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aimo-brain.dev/extensions/trust/v1/schema.json",
+  "title": "AIMO Trust Extension (v1)",
+  "description": "The JSON Schema for the `params` object of an A2A AgentExtension whose `uri` is \"https://aimo-brain.dev/extensions/trust/v1\" (ADR-019 section 6). This document is a DECLARATION of which AIMO BRAIN trust-layer capabilities an agent/organization claims to support and WHERE to independently verify each one -- it is structurally incapable of being, or being mistaken for, the verification result itself. Every boolean-sounding claim in this schema is a claim of SUPPORT, never a claim of CURRENT STATUS: this document never contains fields named 'verified', 'active', or 'authorized', specifically so no implementation can be tempted to read a status flag off the card instead of calling the authoritative source.",
+  "type": "object",
+  "required": ["schema_version", "organization_id", "verification_sources"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "1.0.0",
+      "description": "This descriptor's OWN schema version -- independent of trade_protocol's artifact schema version (docs/PROTOCOLS.md) and independent of the JWS artifact-signature spec version (docs/specs/jws-artifact-signatures.md). A verifier must check this before parsing anything else; an unrecognized version is a parse failure, not a best-effort partial read."
+    },
+    "organization_id": {
+      "type": "string",
+      "description": "The organization this descriptor is published on behalf of. This is a claim made BY the card's own publisher -- a verifier never trusts this value alone; it is only meaningful once cross-checked against the authoritative registry-api/network-api lookups named in verification_sources."
+    },
+    "agent_id": {
+      "type": ["string", "null"],
+      "description": "Optional: the specific agent this descriptor describes, if narrower than the whole organization."
+    },
+    "supported_capabilities": {
+      "type": "array",
+      "description": "Which trust-layer capabilities this agent/organization claims to SUPPORT (per ADR-019 section 3's four-layer model) -- never a claim that any of them currently hold true. Each entry only says 'ask the authoritative source named in verification_sources about this layer'; it is never itself the answer.",
+      "items": {
+        "type": "string",
+        "enum": ["endpoint_control", "key_control", "signing_delegation", "trading_relationship"]
+      },
+      "uniqueItems": true
+    },
+    "verification_sources": {
+      "type": "object",
+      "description": "The ONLY place this descriptor is allowed to point a verifier -- never an inline status. Maps each of the four trust-layer concepts to the live HTTP endpoint that authoritatively answers it. A verifier MUST call these endpoints and MUST NOT short-circuit on anything else present in this document.",
+      "additionalProperties": false,
+      "properties": {
+        "discovery": {
+          "$ref": "#/$defs/verificationSource",
+          "description": "Authoritative source: the agent's own A2A Agent Card URL, fetched directly. Proves only that the endpoint exists and speaks A2A -- nothing about trust (ADR-019 section 5)."
+        },
+        "identity": {
+          "$ref": "#/$defs/verificationSource",
+          "description": "Authoritative source: registry-api's agent-status endpoint. Proves endpoint control and private-key control (ADR-015/016) -- NOT the organization's legal identity (ADR-019 section 5)."
+        },
+        "delegation": {
+          "$ref": "#/$defs/verificationSource",
+          "description": "Authoritative source: network-api's delegations.json / introspection endpoints. Proves a specific key may sign a specific scope of artifact types on this organization's behalf (ADR-017/018) -- not permission to transact."
+        },
+        "trading_relationship": {
+          "$ref": "#/$defs/verificationSource",
+          "description": "Authoritative source: network-api's party/operator-only relationship-status endpoint (ADR-019 section 6/8). Proves counterparty ELIGIBILITY only -- a specific commitment additionally requires in-scope delegation, a live identity/delegation check, an OPA decision, required approval, and the commitment protocol's own semantics (ADR-019 section 5). This endpoint is itself access-controlled: only a party to the relationship, or an AIMO operator, may query it -- this descriptor cannot be used to bypass that, since it only names the endpoint, which still enforces its own access control independently."
+        }
+      }
+    },
+    "freshness_policy": {
+      "type": "object",
+      "description": "States, for each verification source, that it is subject to the SAME freshness/fail-closed rules as everywhere else in this system (ADR-017/018/019) -- a bounded-TTL cache for most lookups, and a mandatory fresh (uncached) check for commitment-adjacent artifact types. This descriptor never overrides or relaxes those rules; it only restates that they apply.",
+      "additionalProperties": false,
+      "properties": {
+        "cache_ttl_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "The bounded staleness window a verifier MAY tolerate for a cached read of any verification_sources endpoint, for non-commitment-adjacent artifact types only."
+        },
+        "commitment_adjacent_artifact_types": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Artifact types (per trade_protocol) for which a verifier MUST force a fresh, uncached check of identity/delegation status, per ADR-017/018's existing rule -- restated here, not redefined."
+        }
+      }
+    }
+  },
+  "$defs": {
+    "verificationSource": {
+      "type": "object",
+      "required": ["endpoint"],
+      "additionalProperties": false,
+      "properties": {
+        "endpoint": {
+          "type": "string",
+          "format": "uri",
+          "description": "The live HTTP endpoint a verifier calls to independently check this claim. Never a value that itself states the result."
+        }
+      }
+    }
+  }
+}

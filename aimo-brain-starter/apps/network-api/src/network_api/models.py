@@ -66,6 +66,7 @@ ORG_ADMIN_CREDENTIAL_SCOPES = (
     "publish_delegations",
     "revoke_delegations",
     "read_key_events",
+    "read_relationships",
 )
 
 
