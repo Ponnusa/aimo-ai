@@ -49,11 +49,23 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      - name: Set up Node (M8 slice 5 TypeScript reference buyer agent)
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
       - name: Install dependencies
         run: uv sync --all-packages
 
       - name: Validate external integration OpenAPI contract
         run: uv run openapi-spec-validator docs/specs/external-integration-openapi.yaml
+
+      - name: Install and type-check the TypeScript reference buyer agent (M8 slice 5)
+        working-directory: aimo-brain-starter/apps/buyer-agent-ts
+        run: |
+          npm ci
+          npx tsc -p tsconfig.json --noEmit
+          npm test
 
       - name: Install OPA
         run: |

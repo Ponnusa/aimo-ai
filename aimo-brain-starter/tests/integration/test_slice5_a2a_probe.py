@@ -10,15 +10,16 @@ failure here is a real wire-level incompatibility, not a test artifact.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import uuid
 from pathlib import Path
 
 import pytest
+
 from database import new_engine
 from identity import issue_service_credential
 
@@ -30,7 +31,8 @@ _TS_PACKAGE_DIR = _REPO_ROOT / "apps" / "buyer-agent-ts"
 
 
 def _fresh_sqlite_url(label: str) -> str:
-    path = os.path.join(tempfile.gettempdir(), f"aimo_slice5_probe_{label}_{uuid.uuid4().hex}.sqlite3")
+    name = f"aimo_slice5_probe_{label}_{uuid.uuid4().hex}.sqlite3"
+    path = os.path.join(tempfile.gettempdir(), name)
     return f"sqlite+aiosqlite:///{path}"
 
 
@@ -113,7 +115,9 @@ def ts_package_installed() -> None:
     never committed node_modules, always a real `npm install` against
     the committed package.json/lockfile."""
     npm = _npm_executable()
-    subprocess.run([npm, "install"], cwd=_TS_PACKAGE_DIR, check=True, capture_output=True, text=True)
+    subprocess.run(
+        [npm, "install"], cwd=_TS_PACKAGE_DIR, check=True, capture_output=True, text=True
+    )
 
 
 @pytest.mark.integration
@@ -133,7 +137,8 @@ async def test_typescript_a2a_probe_against_real_supplier_agent(
     env["SUPPLIER_A2A_URL"] = supplier_server.base_url
     env["PROBE_BUYER_ORGANIZATION_ID"] = "org-probe-external"
 
-    result = subprocess.run(
+    result = await asyncio.to_thread(
+        subprocess.run,
         [npx, "tsx", "src/probe.ts"],
         cwd=_TS_PACKAGE_DIR,
         env=env,

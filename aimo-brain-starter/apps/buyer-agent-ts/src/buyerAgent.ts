@@ -198,6 +198,15 @@ async function main(): Promise<void> {
       return;
     }
 
+    // ADR-020 section 9, test 3: revoke this agent's OWN delegation
+    // right before attempting the commit, to prove the supplier's forced
+    // fresh (never cached) check for commitment-adjacent artifact types
+    // actually rejects a revoked-by-absence key immediately.
+    if (process.env.REVOKE_DELEGATION_BEFORE_COMMIT === "true") {
+      const delegationJti = requireEnv("DELEGATION_JTI");
+      await client.revokeDelegation(buyerOrganizationId, orgScopedCredential, delegationJti);
+    }
+
     // --- Commit ---------------------------------------------------------
     const idempotencyKey = createHash("sha256")
       .update(`${quoteArtifact.content_hash}:${buyerOrganizationId}:${supplierOrganizationId}`)
@@ -228,10 +237,43 @@ async function main(): Promise<void> {
       protocolVersion: "v1",
     });
 
+    let replayConfirmation: unknown;
+    if (process.env.REPLAY_ORDER_COMMIT === "true") {
+      // Same business content (agreement_id, content_hash, idempotency_key),
+      // re-signed with a fresh jti -- a genuine replay of the commit
+      // intent, not a transport-level resend of the identical JWS.
+      const replayRequest = buildEnvelope({
+        transactionId,
+        senderAgentId: buyerAgentId,
+        recipientAgentId: supplierAgentId,
+        organizationId: buyerOrganizationId,
+        artifactType: "order_commit_request",
+        version: 1,
+        proposalId: randomUUID(),
+        payload: { agreement_id: transactionId, content_hash: quoteArtifact.content_hash, idempotency_key: idempotencyKey },
+        validitySeconds: 3600,
+      });
+      const signedReplay = signArtifact(replayRequest as any, {
+        privateKey: agentPrivateKey,
+        kid: delegatedKid,
+        organizationId: buyerOrganizationId,
+        agentId: buyerAgentId,
+        recipientOrganizationId: supplierOrganizationId,
+      });
+      const { responsePayload: replayResult } = await sendDataMessage(supplierAgent, signedReplay, buyerAgentId);
+      await verifyInboundArtifact(client, replayResult as any, {
+        issuerOrganizationId: supplierOrganizationId,
+        expectedRecipientOrganizationId: buyerOrganizationId,
+        protocolVersion: "v1",
+      });
+      replayConfirmation = (replayResult as any).payload;
+    }
+
     console.log(
       JSON.stringify({
         outcome: "committed",
         confirmation: (confirmation as any).payload,
+        replayConfirmation,
         idempotencyKey,
         transactionId,
       }),

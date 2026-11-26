@@ -14,17 +14,17 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import uuid
 from pathlib import Path
 
 import httpx
 import pytest
-from database import Base, new_engine
-from identity import issue_service_credential
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
+
+from database import Base, new_engine
+from identity import issue_service_credential
 
 from .a2a_server_harness import find_free_port, generate_and_register_signing_key, running_server
 
@@ -173,7 +173,9 @@ async def full_stack(monkeypatch):
     with running_server(network_app, port=network_port) as network_server:
         registry_db = _fresh_sqlite_url("registry")
         registry_app = _build_registry_app(
-            database_url=registry_db, network_api_url=network_server.base_url, monkeypatch=monkeypatch
+            database_url=registry_db,
+            network_api_url=network_server.base_url,
+            monkeypatch=monkeypatch,
         )
         await _create_full_schema(registry_db)
 
@@ -267,7 +269,9 @@ async def _order_rows(database_url: str):
 
 @pytest.mark.integration
 @pytest.mark.asyncio
-async def test_typescript_buyer_completes_full_commit_against_real_supplier(full_stack, ts_installed):
+async def test_typescript_buyer_completes_full_commit_against_real_supplier(
+    full_stack, ts_installed
+):
     _, npx = _npm_and_npx()
     stack = full_stack
     # The supplier's real OPA policy (industries/food-wholesale/policies/
@@ -293,7 +297,9 @@ async def test_typescript_buyer_completes_full_commit_against_real_supplier(full
         }
     )
     provisioned = _run_node(npx, "src/provision.ts", provision_env)
-    assert provisioned.returncode == 0, f"provisioning failed:\n{provisioned.stdout}\n{provisioned.stderr}"
+    assert provisioned.returncode == 0, (
+        f"provisioning failed:\n{provisioned.stdout}\n{provisioned.stderr}"
+    )
     provisioning_output = json.loads(provisioned.stdout)
 
     buyer_port = find_free_port()
@@ -312,6 +318,7 @@ async def test_typescript_buyer_completes_full_commit_against_real_supplier(full
             "AGENT_PRIVATE_KEY_JWK": json.dumps(provisioning_output["agentPrivateJwk"]),
             "AGENT_PUBLIC_KEY_JWK": json.dumps(provisioning_output["agentPublicJwk"]),
             "DELEGATED_KID": provisioning_output["delegatedKid"],
+            "REPLAY_ORDER_COMMIT": "true",
         }
     )
     result = _run_node(npx, "src/buyerAgent.ts", buyer_env)
@@ -320,11 +327,18 @@ async def test_typescript_buyer_completes_full_commit_against_real_supplier(full
     output = json.loads(result.stdout.strip().splitlines()[-1])
     assert output["outcome"] == "committed", output
     assert output["confirmation"]["status"] == "CONFIRMED", output
+    # The replay (REPLAY_ORDER_COMMIT=true above) re-signed the same
+    # business content with a fresh jti and was also accepted/verified --
+    # the real guarantee under test is the row count below, not this.
+    assert output["replayConfirmation"]["status"] == "CONFIRMED", output
 
     # --- Harness-only order-persistence assertion (ADR-020 section 8) --
     # The TypeScript buyer has no database access at all; only this
-    # Python harness queries the supplier's own durable state directly.
+    # Python harness queries the supplier's own durable state directly,
+    # proving the replay did NOT create a second order row.
     rows = await _order_rows(stack["supplier_db"])
     matching = [r for r in rows if r.idempotency_key == output["idempotencyKey"]]
-    assert len(matching) == 1, f"expected exactly one order row, found {len(matching)}"
+    assert len(matching) == 1, (
+        f"expected exactly one order row even after replay, found {len(matching)}"
+    )
     assert matching[0].state == "CONFIRMED"
