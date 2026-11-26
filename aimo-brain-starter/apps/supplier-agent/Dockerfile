@@ -6,6 +6,16 @@ FROM python:3.12-slim AS base
 
 RUN pip install --no-cache-dir uv==0.10.9
 
+# OPA binary for subprocess-based policy decisions (ADR-011). CI installs
+# this separately (.github/workflows/ci.yml) but a deployed image must
+# carry it itself. python:3.12-slim has no curl by default.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -sL -o /usr/local/bin/opa https://openpolicyagent.org/downloads/latest/opa_linux_amd64_static \
+    && chmod +x /usr/local/bin/opa \
+    && opa version
+
 WORKDIR /workspace
 
 # Every workspace member must be present for `uv sync --frozen` to
