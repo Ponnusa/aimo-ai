@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aimobrain.example/food-wholesale/authorization_evidence/v0.1",
+  "title": "Food Wholesale Authorization Evidence",
+  "description": "One organization's independent policy decision (and, if required, human approval) for an exact proposed_agreement content_hash. Carried authenticated by an agent-scoped service credential in the A2A message metadata -- this artifact's organization_id/sender_agent_id fields are routing hints, never authentication evidence by themselves (CLAUDE.md M5).",
+  "type": "object",
+  "required": [
+    "schema",
+    "artifact_id",
+    "transaction_id",
+    "correlation_id",
+    "sender_agent_id",
+    "recipient_agent_id",
+    "organization_id",
+    "domain",
+    "type",
+    "version",
+    "proposal_id",
+    "created_at",
+    "expires_at",
+    "payload"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "artifact_id": {
+      "type": "string"
+    },
+    "transaction_id": {
+      "type": "string"
+    },
+    "correlation_id": {
+      "type": "string"
+    },
+    "sender_agent_id": {
+      "type": "string"
+    },
+    "recipient_agent_id": {
+      "type": "string"
+    },
+    "organization_id": {
+      "type": "string"
+    },
+    "domain": {
+      "const": "food-wholesale"
+    },
+    "type": {
+      "const": "authorization_evidence"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "proposal_id": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "agreement_id",
+        "content_hash",
+        "allow",
+        "human_approval_required",
+        "policy_version",
+        "policy_input_digest"
+      ],
+      "properties": {
+        "agreement_id": {
+          "type": "string"
+        },
+        "content_hash": {
+          "type": "string",
+          "description": "The exact proposed_agreement content_hash this evidence authorizes. Never a different or re-derived hash."
+        },
+        "allow": {
+          "type": "boolean"
+        },
+        "human_approval_required": {
+          "type": "boolean"
+        },
+        "deny_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "policy_version": {
+          "type": "string"
+        },
+        "policy_input_digest": {
+          "type": "string"
+        },
+        "approval_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "approver_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "description": "Per-artifact JWS signature (M5.1, docs/DECISIONS.md ADR-012): the sender organization's Ed25519 signature over this artifact's canonicalized content plus iss/sub/aud/neg/typ/ver/hash/jti/exp claims. message_integrity.verify_artifact_proof requires its presence and validity before any business handler runs -- optional here because JSON Schema validates structure, not authentication.",
+      "required": [
+        "alg",
+        "kid",
+        "jws"
+      ],
+      "properties": {
+        "alg": {
+          "const": "EdDSA"
+        },
+        "kid": {
+          "type": "string"
+        },
+        "jws": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

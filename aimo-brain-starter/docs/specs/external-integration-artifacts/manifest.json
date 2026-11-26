@@ -1,0 +1,62 @@
+{
+  "$comment": "M8 slice 5 (ADR-020 section 6). The vertical, domain-specific business-artifact contract, published separately from the horizontal external-integration-openapi.yaml transport/auth contract. An external integrator builds and verifies these artifacts directly from this manifest and the schema files it lists -- never by inspecting AIMO's internal Python models (food_wholesale/trade_protocol), which remain free to change their own internal representation as long as the wire shape documented here stays stable across a version bump.",
+  "manifest_version": "1.0.0",
+  "domain": "food-wholesale",
+  "canonicalization_and_signing": {
+    "spec": "../jws-artifact-signatures.md",
+    "summary": "Every artifact listed below is signed as a JWS compact token attached at its own `proof` field ({alg: \"EdDSA\", kid, jws}). The signed claims are {iss: organization_id, sub: agent_id, aud: recipient_organization_id, neg: transaction_id, typ: artifact.type, ver: artifact.version, hash: artifact.content_hash (or null), artifact_digest, jti, iat, exp}, where artifact_digest is the SHA-256 hex digest of the canonicalized artifact (every field except `proof`) per the canonicalization spec linked above. A verifier must recompute artifact_digest itself and reject any mismatch -- never trust a signed digest without recomputing it against the artifact actually received."
+  },
+  "artifacts": [
+    {
+      "type": "request_for_quote",
+      "identifier": "https://schemas.aimobrain.example/food-wholesale/request_for_quote/v0.1",
+      "version": "0.1",
+      "schema": "schemas/request_for_quote.schema.json",
+      "direction": "buyer -> supplier",
+      "signed": true
+    },
+    {
+      "type": "quote",
+      "identifier": "https://schemas.aimobrain.example/food-wholesale/quote/v0.1",
+      "version": "0.1",
+      "schema": "schemas/quote.schema.json",
+      "direction": "supplier -> buyer",
+      "signed": true
+    },
+    {
+      "type": "accept_proposal",
+      "identifier": "https://schemas.aimobrain.example/food-wholesale/accept_proposal/v0.1",
+      "version": "0.1",
+      "schema": "schemas/accept_proposal.schema.json",
+      "direction": "buyer -> supplier",
+      "signed": true
+    },
+    {
+      "type": "authorization_evidence",
+      "identifier": "https://schemas.aimobrain.example/food-wholesale/authorization_evidence/v0.1",
+      "version": "0.1",
+      "schema": "schemas/authorization_evidence.schema.json",
+      "direction": "bidirectional",
+      "signed": true,
+      "note": "Each side constructs and signs its OWN authorization_evidence from its own independent policy decision (ADR-020 section 6). policy_version/policy_input_digest are opaque strings identifying that side's own decision process -- this schema does not define, and no protocol layer provides, any cross-organization attestation of the decision's correctness. Do not describe this evidence as independently attested beyond what is stated here: it attests only that the signing organization itself produced this allow/deny decision for this exact content_hash, authenticated by that organization's own signature."
+    },
+    {
+      "type": "order_commit_request",
+      "identifier": "https://schemas.aimobrain.example/food-wholesale/order_commit_request/v0.1",
+      "version": "0.1",
+      "schema": "schemas/order_commit_request.schema.json",
+      "direction": "buyer -> supplier",
+      "signed": true
+    },
+    {
+      "type": "order_confirmation",
+      "identifier": "https://schemas.aimobrain.example/food-wholesale/order_confirmation/v0.1",
+      "version": "0.1",
+      "schema": "schemas/order_confirmation.schema.json",
+      "direction": "supplier -> buyer",
+      "signed": true
+    }
+  ],
+  "scope_note": "This manifest covers only the happy-path negotiation/commitment subset slice 5's reference agent exchanges (request_for_quote, quote, accept_proposal, authorization_evidence, order_commit_request, order_confirmation). counterproposal, reject_proposal, proposed_agreement, and the product_availability_* types exist in this system's protocol but are out of this manifest's scope for now -- an external integrator relying on them should request they be added rather than infer their shape from this manifest's omission.",
+  "not_covered_by_this_manifest": "The transport, authentication, discovery, and trust-boundary contract (registry-api/network-api routes) is published separately at ../external-integration-openapi.yaml. This manifest is deliberately only the vertical, domain-specific artifact shapes exchanged once two parties are already discovering and verifying each other through that horizontal contract."
+}

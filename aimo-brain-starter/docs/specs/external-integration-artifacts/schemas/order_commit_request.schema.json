@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aimobrain.example/food-wholesale/order_commit_request/v0.1",
+  "title": "Food Wholesale Order Commit Request",
+  "description": "Buyer's commitment intent: sent only after both organizations hold matching, allowed authorization_evidence for the same content_hash. Sending this message is not itself binding -- it becomes binding only once the supplier's mock order adapter confirms (order_confirmation, status=CONFIRMED).",
+  "type": "object",
+  "required": [
+    "schema",
+    "artifact_id",
+    "transaction_id",
+    "correlation_id",
+    "sender_agent_id",
+    "recipient_agent_id",
+    "organization_id",
+    "domain",
+    "type",
+    "version",
+    "proposal_id",
+    "created_at",
+    "expires_at",
+    "payload"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "artifact_id": {
+      "type": "string"
+    },
+    "transaction_id": {
+      "type": "string"
+    },
+    "correlation_id": {
+      "type": "string"
+    },
+    "sender_agent_id": {
+      "type": "string"
+    },
+    "recipient_agent_id": {
+      "type": "string"
+    },
+    "organization_id": {
+      "type": "string"
+    },
+    "domain": {
+      "const": "food-wholesale"
+    },
+    "type": {
+      "const": "order_commit_request"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "proposal_id": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "agreement_id",
+        "content_hash",
+        "idempotency_key"
+      ],
+      "properties": {
+        "agreement_id": {
+          "type": "string"
+        },
+        "content_hash": {
+          "type": "string"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "description": "sha256(content_hash + buyer_organization_id + supplier_organization_id) -- stable across retries, never regenerated per attempt."
+        }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "description": "Per-artifact JWS signature (M5.1, docs/DECISIONS.md ADR-012): the sender organization's Ed25519 signature over this artifact's canonicalized content plus iss/sub/aud/neg/typ/ver/hash/jti/exp claims. message_integrity.verify_artifact_proof requires its presence and validity before any business handler runs -- optional here because JSON Schema validates structure, not authentication.",
+      "required": [
+        "alg",
+        "kid",
+        "jws"
+      ],
+      "properties": {
+        "alg": {
+          "const": "EdDSA"
+        },
+        "kid": {
+          "type": "string"
+        },
+        "jws": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}
