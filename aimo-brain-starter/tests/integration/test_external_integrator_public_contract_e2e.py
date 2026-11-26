@@ -25,18 +25,34 @@ self-service) is performed using ONLY:
 If any step genuinely required something outside this contract, that would
 be reported as a blocking finding rather than quietly worked around -- no
 such step was found.
+
+This is also not just a hard-coded "this route exists" assertion: every
+post-bootstrap HTTP response is checked, programmatically, against the
+published OpenAPI document itself (``_assert_response_conforms_to_contract``
+below) -- the method, path, required parameters and response status all
+have to actually appear in ``external-integration-openapi.yaml``, or the
+test fails. This is what the PR #7 independent review found missing: the
+first draft of this file made exactly this flow's calls but never checked
+them against the spec, so a real gap (``POST /agents`` undocumented) went
+unnoticed. ``test_contract_conformance_check_catches_an_undocumented_route``
+below proves this checker actually has teeth, by removing that same route
+from a loaded copy of the spec and confirming the check then fails.
 """
 
 from __future__ import annotations
 
 import base64
+import copy
 import os
+import re
 import tempfile
 import uuid
+from pathlib import Path
 
 import httpx
 import jwt
 import pytest
+import yaml
 from a2a.types import AgentCapabilities, AgentCard, AgentInterface
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -53,6 +69,83 @@ ADMIN_KEY = "e2e-admin-key-never-used-by-the-integrator"
 INTERNAL_KEY = "e2e-internal-key"
 EXTERNAL_ORG = "org_external_integrator_01"
 AGENT_ID = "agent_external_integrator_01"
+
+OPENAPI_SPEC_PATH = (
+    Path(__file__).resolve().parents[2] / "docs" / "specs" / "external-integration-openapi.yaml"
+)
+
+
+def _load_contract_spec() -> dict:
+    with OPENAPI_SPEC_PATH.open(encoding="utf-8") as fh:
+        return yaml.safe_load(fh)
+
+
+def _spec_path_regex(template: str) -> re.Pattern[str]:
+    """Turns an OpenAPI path template (e.g.
+    ``/organizations/{organization_id}/relationship-status/{counterparty_organization_id}``)
+    into a regex that matches a real request path with those segments
+    substituted for concrete values."""
+    escaped = re.escape(template)
+    pattern = re.sub(r"\\\{[^}]+\\\}", r"[^/]+", escaped)
+    return re.compile(f"^{pattern}$")
+
+
+def _match_operation(spec: dict, *, method: str, path: str) -> tuple[str, dict] | None:
+    for template, path_item in spec.get("paths", {}).items():
+        if _spec_path_regex(template).match(path):
+            operation = path_item.get(method.lower())
+            if operation is not None:
+                return template, operation
+    return None
+
+
+def _required_query_params(operation: dict) -> set[str]:
+    return {
+        p["name"]
+        for p in operation.get("parameters", [])
+        if p.get("in") == "query" and p.get("required")
+    }
+
+
+def _assert_call_conforms_to_contract(
+    spec: dict, *, method: str, url: httpx.URL, status_code: int
+) -> None:
+    """Fails if this exact HTTP call is not something the published
+    contract actually documents: an undocumented method/path, a missing
+    required query parameter, or a response status the spec never lists
+    for that operation."""
+    match = _match_operation(spec, method=method, path=url.path)
+    if match is None:
+        raise AssertionError(
+            f"{method} {url.path} is not a documented operation in the published "
+            f"contract ({OPENAPI_SPEC_PATH.name})."
+        )
+    template, operation = match
+
+    missing_params = _required_query_params(operation) - set(url.params.keys())
+    if missing_params:
+        raise AssertionError(
+            f"{method} {template}: this call is missing required query "
+            f"parameter(s) {sorted(missing_params)} that the published contract "
+            f"requires (called as {url})."
+        )
+
+    documented_statuses = set(operation.get("responses", {}).keys())
+    if str(status_code) not in documented_statuses and "default" not in documented_statuses:
+        raise AssertionError(
+            f"{method} {template} returned HTTP {status_code}, which the published "
+            f"contract does not document for this operation (documented: "
+            f"{sorted(documented_statuses)})."
+        )
+
+
+def _assert_response_conforms_to_contract(spec: dict, response: httpx.Response) -> None:
+    _assert_call_conforms_to_contract(
+        spec,
+        method=response.request.method,
+        url=response.request.url,
+        status_code=response.status_code,
+    )
 
 
 def _fresh_sqlite_url(label: str) -> str:
@@ -389,6 +482,31 @@ async def test_external_integrator_completes_the_published_flow_using_only_the_p
                     assert discover.status_code == 200
                     assert any(a["agent_id"] == AGENT_ID for a in discover.json())
 
+                    # === Contract conformance: every post-bootstrap call
+                    # above (steps 1-10, never the operator-only bootstrap
+                    # in step 0, which is intentionally absent from the
+                    # public contract) must match a real, documented
+                    # operation in external-integration-openapi.yaml --
+                    # method, path, required parameters, and response
+                    # status. This is what makes this an automated check
+                    # of the published contract's completeness, not just
+                    # a hard-coded list of routes this test happens to
+                    # know about. ===================================
+                    spec = _load_contract_spec()
+                    for response in (
+                        register_root,
+                        mint,
+                        register_agent,
+                        start,
+                        confirm,
+                        publish,
+                        jwks,
+                        delegations,
+                        relationship,
+                        discover,
+                    ):
+                        _assert_response_conforms_to_contract(spec, response)
+
                     # --- Negative control: the integrator's org-scoped
                     # credential must still never work as the global key,
                     # and the global key must never work for this now-
@@ -405,3 +523,67 @@ async def test_external_integrator_completes_the_published_flow_using_only_the_p
                         headers={"X-Admin-Key": ADMIN_KEY},
                     )
                     assert rejected.status_code == 401
+
+
+def test_contract_conformance_check_catches_an_undocumented_route() -> None:
+    """Proves ``_assert_call_conforms_to_contract`` genuinely has teeth,
+    rather than being a check that would pass against any spec. Exactly
+    reproduces the real PR #7 defect: a ``POST /agents`` call made during
+    the walkthrough above, checked against a copy of the real spec with
+    that one operation removed. Also proves the inverse: the SAME call
+    passes against the real, current spec -- so this isn't just an
+    always-fails or always-passes stub."""
+    real_spec = _load_contract_spec()
+    agents_post_call_url = httpx.URL("http://registry-api.example/agents")
+
+    # Against the real, current spec: POST /agents is documented, so this
+    # must pass.
+    _assert_call_conforms_to_contract(
+        real_spec, method="POST", url=agents_post_call_url, status_code=200
+    )
+
+    # Against a copy with POST /agents removed (reproducing the exact
+    # PR #7 gap the independent review found): the same call must fail.
+    spec_missing_agents_post = copy.deepcopy(real_spec)
+    del spec_missing_agents_post["paths"]["/agents"]["post"]
+    with pytest.raises(AssertionError, match="not a documented operation"):
+        _assert_call_conforms_to_contract(
+            spec_missing_agents_post, method="POST", url=agents_post_call_url, status_code=200
+        )
+
+
+def test_contract_conformance_check_catches_a_missing_required_query_parameter() -> None:
+    """Same proof-of-teeth, for the other defect class PR #7's review
+    found: ``verification/start`` requiring ``organization_id`` as a
+    query parameter without the spec declaring it."""
+    real_spec = _load_contract_spec()
+    call_with_org_id = httpx.URL(
+        "http://registry-api.example/agents/agent_x/verification/start",
+        params={"organization_id": "org_x"},
+    )
+    call_without_org_id = httpx.URL("http://registry-api.example/agents/agent_x/verification/start")
+
+    # With the required query parameter present: passes against the real spec.
+    _assert_call_conforms_to_contract(
+        real_spec, method="POST", url=call_with_org_id, status_code=200
+    )
+
+    # Without it: fails, because the spec declares organization_id required.
+    with pytest.raises(AssertionError, match="missing required query parameter"):
+        _assert_call_conforms_to_contract(
+            real_spec, method="POST", url=call_without_org_id, status_code=200
+        )
+
+    # And if the spec itself regressed to not declaring organization_id as
+    # required at all, the same omitted-parameter call would wrongly pass
+    # -- proving the check's bite comes from the spec's own declaration,
+    # not from this test's own hard-coded expectations.
+    spec_without_required_param = copy.deepcopy(real_spec)
+    for param in spec_without_required_param["paths"]["/agents/{agent_id}/verification/start"][
+        "post"
+    ]["parameters"]:
+        if param["name"] == "organization_id":
+            param["required"] = False
+    _assert_call_conforms_to_contract(
+        spec_without_required_param, method="POST", url=call_without_org_id, status_code=200
+    )

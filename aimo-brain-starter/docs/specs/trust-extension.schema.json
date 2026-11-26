@@ -79,7 +79,7 @@
         "endpoint": {
           "type": "string",
           "format": "uri",
-          "description": "The live HTTP endpoint a verifier calls to independently check this claim. Never a value that itself states the result."
+          "description": "Identifies WHICH operation a verifier should check for this claim -- never a value that itself states the result, AND never a host to be trusted merely because this descriptor named it. A verifier MUST resolve this against its own independently configured, trusted AIMO base URL for this layer, MUST NOT forward any credential to a host this descriptor supplied, and MUST NOT follow a redirect to an untrusted host while still treating the response as authoritative (see docs/specs/trust-extension.md, 'The endpoint field names an operation, never a trusted host')."
         }
       }
     }
