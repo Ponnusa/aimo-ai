@@ -961,3 +961,201 @@ async def test_oidc_mapping_route_authorization_matrix(monkeypatch) -> None:
         )
         assert second_org.status_code == 200
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_relationship_status_route_authorization_matrix(monkeypatch) -> None:
+    """GET /organizations/{id}/relationship-status/{counterparty_id}
+    (ADR-019 section 6/8): answerable only to a party to the relationship
+    or an operator -- never an open third-party lookup. Covers: a party
+    querying its own relationship, the other party querying the same
+    relationship, an operator querying any pair, an unrelated third
+    organization denied (both by lacking authority over either side, and
+    structurally unable to even phrase a query naming two organizations
+    it isn't one of), external global-key rejection, cross-organization
+    credential misuse, and missing/unknown auth_mode denying rather than
+    defaulting to legacy."""
+    monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
+    from network_api.models import TradingRelationshipRecord
+
+    app, engine, settings = await _fresh_app_with_orgs(
+        "org_rel_buyer",
+        "org_rel_supplier",
+        "org_rel_third",
+        "org_rel_unknown_mode",
+        auth_mode="legacy_global_key",
+    )
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        from datetime import UTC, datetime
+
+        now = datetime.now(UTC).replace(tzinfo=None)
+        session.add(
+            TradingRelationshipRecord(
+                buyer_organization_id="org_rel_buyer",
+                supplier_organization_id="org_rel_supplier",
+                status="active",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Bootstrap the buyer side to an org-scoped credential so both
+        # auth_mode paths are exercised across this one test.
+        buyer_secret = await _bootstrap_external(client, settings, "org_rel_buyer")
+
+        # The buyer (now org_scoped_credential) can query its own
+        # relationship with the supplier using its own credential.
+        as_buyer = await client.get(
+            "/organizations/org_rel_buyer/relationship-status/org_rel_supplier",
+            headers={"Authorization": f"Bearer {buyer_secret}"},
+        )
+        assert as_buyer.status_code == 200, as_buyer.text
+        assert as_buyer.json() == {"exists": True, "status": "active"}
+
+        # The supplier (still legacy_global_key) can query the same
+        # relationship from its own side, using the global key.
+        as_supplier = await client.get(
+            "/organizations/org_rel_supplier/relationship-status/org_rel_buyer",
+            headers={"X-Admin-Key": settings.network_admin_api_key},
+        )
+        assert as_supplier.status_code == 200
+        assert as_supplier.json() == {"exists": True, "status": "active"}
+
+        # An AIMO operator can query any pair, bypassing per-organization
+        # authority entirely.
+        as_operator = await client.get(
+            "/organizations/org_rel_buyer/relationship-status/org_rel_supplier",
+            headers={"X-Operator-Key": settings.network_operator_key},
+        )
+        assert as_operator.status_code == 200
+        assert as_operator.json() == {"exists": True, "status": "active"}
+
+        # External global-key rejection: the buyer is now org_scoped_credential,
+        # so its own legacy global key no longer works for it.
+        global_key_on_external = await client.get(
+            "/organizations/org_rel_buyer/relationship-status/org_rel_supplier",
+            headers={"X-Admin-Key": settings.network_admin_api_key},
+        )
+        assert global_key_on_external.status_code == 401
+
+        # An unrelated third organization cannot phrase a query naming two
+        # organizations it isn't one of -- it can only authenticate as
+        # itself, so it can only ever ask about its own relationships. It
+        # genuinely has no relationship, so this correctly reports
+        # exists=False rather than ever disclosing the buyer/supplier pair.
+        third_party = await client.get(
+            "/organizations/org_rel_third/relationship-status/org_rel_buyer",
+            headers={"X-Admin-Key": settings.network_admin_api_key},
+        )
+        assert third_party.status_code == 200
+        assert third_party.json() == {"exists": False, "status": None}
+
+        # Cross-organization credential misuse: the buyer's own credential
+        # cannot be used to query as if it were the supplier.
+        cross_org = await client.get(
+            "/organizations/org_rel_supplier/relationship-status/org_rel_buyer",
+            headers={"Authorization": f"Bearer {buyer_secret}"},
+        )
+        assert cross_org.status_code == 401
+
+        # Missing/unknown auth_mode denies, never defaults to legacy.
+        async with session_factory() as session:
+            org = await session.get(OrganizationRecord, "org_rel_unknown_mode")
+            org.auth_mode = "garbage"
+            await session.commit()
+        unknown_mode = await client.get(
+            "/organizations/org_rel_unknown_mode/relationship-status/org_rel_buyer",
+            headers={"X-Admin-Key": settings.network_admin_api_key},
+        )
+        assert unknown_mode.status_code == 403
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_relationship_status_denies_unrelated_third_org_querying_other_parties(
+    monkeypatch,
+) -> None:
+    """Dedicated regression test for the PR #7 independent-review gap:
+    the existing authorization-matrix test's "third_party" case only ever
+    had the third organization authenticate as ITSELF and ask about its
+    own (nonexistent) relationship with one other org -- it never covered
+    an unrelated third organization, authenticated with its OWN valid
+    credential, attempting to ask about two OTHER real parties'
+    relationship. This is the exact scenario the endpoint's own docstring
+    and docs/specs/trust-extension.md's access-control claim describe:
+    an organization that is neither named party cannot phrase this query
+    at all, regardless of how valid its own credential is, and the
+    denial must not leak whether the relationship it asked about exists."""
+    monkeypatch.setenv("EXTERNAL_ONBOARDING_ENABLED", "true")
+    from datetime import UTC, datetime
+
+    from network_api.models import TradingRelationshipRecord
+
+    app, engine, settings = await _fresh_app_with_orgs(
+        "org_priv_buyer",
+        "org_priv_supplier",
+        "org_priv_unrelated_third",
+        auth_mode="legacy_global_key",
+    )
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with session_factory() as session:
+        now = datetime.now(UTC).replace(tzinfo=None)
+        session.add(
+            TradingRelationshipRecord(
+                buyer_organization_id="org_priv_buyer",
+                supplier_organization_id="org_priv_supplier",
+                status="active",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # The unrelated third organization gets its own, genuinely valid,
+        # org-scoped credential -- this is not a missing/invalid-credential
+        # case, it is a real credential that simply belongs to neither
+        # named party.
+        third_secret = await _bootstrap_external(client, settings, "org_priv_unrelated_third")
+
+        # It attempts to ask about the BUYER and SUPPLIER's relationship
+        # -- a real pair of OTHER organizations, neither of which is the
+        # third org -- using its own valid credential.
+        denied = await client.get(
+            "/organizations/org_priv_buyer/relationship-status/org_priv_supplier",
+            headers={"Authorization": f"Bearer {third_secret}"},
+        )
+        assert denied.status_code == 401, denied.text
+        # The denial must not disclose that the relationship exists (or
+        # anything else about it) -- the response body carries no
+        # relationship fields at all, only an auth-failure detail.
+        body = denied.json()
+        assert "exists" not in body
+        assert "status" not in body or "detail" in body
+
+        # Confirm this isn't a false negative from a credential bug: the
+        # same credential genuinely works for the third org's own (empty)
+        # relationship query, proving it is valid and simply does not
+        # authorize this one.
+        own_query = await client.get(
+            "/organizations/org_priv_unrelated_third/relationship-status/org_priv_buyer",
+            headers={"Authorization": f"Bearer {third_secret}"},
+        )
+        assert own_query.status_code == 200, own_query.text
+        assert own_query.json() == {"exists": False, "status": None}
+
+        # And confirm the real relationship does genuinely exist (so the
+        # 401 above is a true denial of a real relationship, not an
+        # accidental match against "no relationship" either).
+        as_buyer_itself = await client.get(
+            "/organizations/org_priv_buyer/relationship-status/org_priv_supplier",
+            headers={"X-Admin-Key": settings.network_admin_api_key},
+        )
+        assert as_buyer_itself.status_code == 200
+        assert as_buyer_itself.json() == {"exists": True, "status": "active"}
+    await engine.dispose()

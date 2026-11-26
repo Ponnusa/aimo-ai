@@ -1,0 +1,801 @@
+openapi: 3.1.0
+info:
+  title: AIMO BRAIN External Integration API
+  version: "1.0.0"
+  license:
+    name: Proprietary
+    identifier: LicenseRef-AIMO-BRAIN-Proprietary
+  description: |
+    The public contract for an independently-operated, non-AIMO-hosted organization
+    integrating with AIMO BRAIN (M8 slice 4, ADR-019). This is deliberately a SUBSET
+    of what `registry-api` and `network-api` actually expose: every AIMO-internal
+    endpoint (the shared `network_admin_api_key` path, the `network_operator_key`
+    bootstrap/recovery path, the `network_internal_service_key` service-to-service
+    path, and `registry_api`'s `registry_admin_token` classification endpoint) is
+    deliberately absent from this document. An external integrator never needs, and
+    must never be given, any of those three secrets.
+
+    ## The four-layer trust model (ADR-019 section 5)
+
+    Climbing one of these layers never implies you have climbed another. Each has
+    its own authoritative source, named below, and its own independent check.
+
+    | Layer | Proves | Does NOT prove | Authoritative source |
+    |---|---|---|---|
+    | Discovery | The endpoint exists and speaks A2A | Anything about trust | The agent's own Agent Card |
+    | Verified identity | This agent controls this endpoint and this key | The organization's legal identity | `GET /agents/{agent_id}` (registry-api) |
+    | Signing delegation | This key may sign this scope of artifacts for this org | Permission to transact | `GET /organizations/{organization_id}/delegations.json` (network-api) |
+    | Permission to trade | Counterparty ELIGIBILITY only | Authorization of any specific transaction | `GET /organizations/{organization_id}/relationship-status/{counterparty_organization_id}` (network-api) |
+
+    A specific business commitment additionally requires: the artifact's type is
+    within the presented delegation's scope, a live (never stale-cached for
+    commitment-adjacent artifact types) identity/delegation check, an OPA policy
+    decision, any required human approval, and the commitment protocol's own
+    two-round-trip semantics (`docs/DECISIONS.md` ADR-011). The relationship-status
+    endpoint never substitutes for any of these — it answers eligibility only.
+
+    See `docs/specs/trust-extension.md` for the declarative Agent-Card extension
+    that points at these same authoritative sources (and never asserts their
+    answers itself), and `docs/specs/jws-artifact-signatures.md` for the
+    cross-language signature specification every signed artifact and delegation
+    token in this contract uses.
+
+    ## Freshness and fail-closed behavior
+
+    Every read in this contract is subject to a bounded-TTL cache at most; a
+    verifier MAY tolerate a cached answer no longer than that TTL, and MUST force
+    a fresh (uncached) check for `authorization_evidence`, `order_commit_request`,
+    and `order_confirmation` artifact types, exactly as ADR-017/018 specify. On a
+    timeout, a malformed response, or any claim mismatch, every endpoint in this
+    contract fails closed — an ambiguous result is always treated as a rejection,
+    never a best-effort accept.
+
+    ## External onboarding is not enabled by default
+
+    `external_onboarding_enabled` defaults to `false` platform-wide. An
+    organization reaches the `org_scoped_credential` authentication mode in this
+    contract only through an AIMO operator's own bootstrap action (outside this
+    contract's scope — it is not a self-service call) while that flag is
+    explicitly enabled for a given deployment.
+
+servers:
+  - url: https://registry-api.example.aimo-brain.internal
+    description: registry-api (agent discovery, registration, identity verification)
+  - url: https://network-api.example.aimo-brain.internal
+    description: network-api (organization credentials, signing keys, delegations, trading relationships)
+
+components:
+  securitySchemes:
+    OrgScopedCredential:
+      type: http
+      scheme: bearer
+      description: |
+        An organization's own scoped admin credential (ADR-019 section 2) — a
+        v1 machine-admin mechanism, not human OIDC and not member-level RBAC.
+        Delivered exactly once, at bootstrap or rotation, by an AIMO operator;
+        never recoverable afterward. Bound to exactly one organization_id, and
+        to an enumerated, non-overridable set of scopes — it can never reach
+        platform bootstrap, auth_mode changes, or another organization's data.
+        Verified by network-api against OrganizationAdminCredentialRecord.
+
+    ServiceCredential:
+      type: http
+      scheme: bearer
+      description: |
+        A `manage_agents`-scoped service credential, minted by
+        `POST /organizations/{organization_id}/service-credentials` using
+        the organization's OrgScopedCredential, and consumed only by
+        registry-api (never network-api) to authorize agent-management
+        calls for that one organization_id. A DIFFERENT credential from
+        OrgScopedCredential — holding one never grants the other.
+        Opaque and introspection-only (ADR-019 section 4): registry-api
+        always calls network-api's own `/introspect` endpoint to resolve
+        it; there is nothing for a holder of any other secret to forge
+        locally.
+
+  schemas:
+    AgentManagementOut:
+      type: object
+      properties:
+        agent_id: { type: string }
+        organization_id: { type: string }
+        display_name: { type: string }
+        a2a_card_url: { type: string, format: uri }
+        status: { type: string, enum: [pending, active, suspended, revoked] }
+        agent_classification: { type: string, enum: [legacy, external] }
+        card_fingerprint: { type: string }
+        capabilities: { type: array, items: { type: string } }
+        registered_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        last_verified_at: { type: [string, "null"], format: date-time }
+        has_signing_key: { type: boolean }
+
+    VerificationStartOut:
+      type: object
+      properties:
+        agent_id: { type: string }
+        endpoint_challenge:
+          type: string
+          description: Served verbatim at `challenge_path` to prove endpoint control.
+        key_challenge:
+          type: [string, "null"]
+          description: |
+            `null` unless the agent registered a signing key at `POST
+            /agents`. Sign this with that key's matching private key to
+            prove key control — a separate challenge from
+            `endpoint_challenge`, never the same string used for both
+            purposes (ADR-015 section D).
+        challenge_path:
+          type: string
+          description: The well-known path the agent's own endpoint must serve `endpoint_challenge` at.
+        expires_at: { type: string, format: date-time }
+
+    AgentSenderVerificationOut:
+      type: object
+      properties:
+        agent_id: { type: string }
+        organization_id: { type: string }
+        status: { type: string, enum: [active] }
+
+    DiscoveredAgent:
+      type: object
+      properties:
+        agent_id: { type: string }
+        organization_id: { type: string }
+        display_name: { type: string }
+        status: { type: string, enum: [active] }
+        capabilities: { type: array, items: { type: string } }
+        a2a_endpoint_url: { type: string, format: uri }
+      description: |
+        Proves DISCOVERY only. `status: active` additionally reflects this
+        agent having passed registry-api's own endpoint-control and
+        private-key-control verification (ADR-015/016) — it does not reflect
+        anything about signing delegation or trading-relationship status.
+
+    RelationshipStatus:
+      type: object
+      required: [exists, status]
+      properties:
+        exists: { type: boolean }
+        status: { type: [string, "null"], enum: [active, suspended, revoked, null] }
+      description: |
+        Deliberately minimal — existence and status only, never an internal
+        relationship id or timestamps. Answerable only to one of the two
+        actual parties to the relationship, or an AIMO operator (ADR-019
+        section 6/8) — this schema's minimalism does not weaken that access
+        control, which is enforced independently at the endpoint itself.
+
+    DelegationList:
+      type: object
+      properties:
+        delegations:
+          type: array
+          items:
+            type: string
+          description: |
+            Each entry is a raw delegation JWS compact token, not pre-parsed
+            metadata — a verifier decodes it (per
+            docs/specs/jws-artifact-signatures.md) to read delegated_kid,
+            scope, audience and validity directly from its own signed claims.
+      description: |
+        Only currently-live (unexpired, unrevoked) delegations — revocation is
+        enforced by absence, per ADR-017/018. A delegation's scope must be
+        checked against an artifact's own type before its signature is trusted
+        as authorizing that artifact type at all.
+
+    OrganizationAdminCredential:
+      type: object
+      properties:
+        admin_credential:
+          type: string
+          description: |
+            Returned exactly once, in this response only. Never retrievable
+            again by any subsequent call — a lost credential requires rotation,
+            which invalidates it and issues a new one atomically.
+        organization_id: { type: string }
+        scopes:
+          type: array
+          items:
+            type: string
+            enum:
+              - manage_members
+              - read_members
+              - issue_service_credentials
+              - rotate_signing_keys
+              - publish_delegations
+              - revoke_delegations
+              - read_key_events
+              - read_relationships
+
+paths:
+  /agents:
+    get:
+      summary: Discover registered agents (Layer 1 — Discovery, with a Layer 2 — Verified Identity filter)
+      operationId: discoverAgents
+      description: |
+        Unauthenticated at the transport level; results are filtered server-side
+        to agents the requesting organization already has a trading relationship
+        with, or that belong to the requesting organization itself. `status:
+        active` on a returned row additionally reflects verified identity
+        (ADR-015/016) — it says nothing about signing delegation or permission
+        to trade.
+      security: []
+      parameters:
+        - name: requesting_organization_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: skill_id
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/DiscoveredAgent" } }
+    post:
+      summary: Register (or re-register) one of this organization's own agents (Layer 2 — Verified Identity, registration half)
+      operationId: registerAgent
+      description: |
+        Requires the `manage_agents`-scoped ServiceCredential minted by
+        `POST /organizations/{organization_id}/service-credentials` —
+        never the organization's own OrgScopedCredential directly, and
+        never network-api's admin key or operator key. Registration alone
+        leaves the agent `status: pending`; it does not activate it — see
+        `verification/start`/`verification/confirm`. Supplying
+        `signing_public_key_jwk` is required when the organization has
+        been classified for external onboarding (ADR-015/016); once an
+        agent has a signing key on file, changing it via re-registration
+        is rejected (key rotation is a separate follow-up), and the same
+        key may not be registered to two different agent_ids.
+      security:
+        - ServiceCredential: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id, organization_id, a2a_card_url]
+              properties:
+                agent_id: { type: string }
+                organization_id: { type: string }
+                a2a_card_url: { type: string, format: uri }
+                display_name: { type: [string, "null"] }
+                signing_public_key_jwk:
+                  type: [object, "null"]
+                  description: RFC 8037 Ed25519 (OKP) public JWK this agent claims to control.
+      responses:
+        "200":
+          description: OK (both first-time registration and idempotent re-registration)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentManagementOut" }
+        "400":
+          description: |
+            Invalid signing_public_key_jwk, a required signing key was
+            omitted for an externally-onboarded organization, or the
+            Agent Card at a2a_card_url could not be fetched/validated
+        "401":
+          description: Missing/invalid bearer credential
+        "403":
+          description: Credential does not grant management of this organization_id's agents
+        "409":
+          description: |
+            agent_id already belongs to a different organization, the
+            agent is revoked (terminal — cannot be re-registered), the
+            signing key would be substituted for an existing one, the
+            signing key is already registered to a different agent_id,
+            or a concurrent registration for the same new agent_id lost
+            the race
+
+  /agents/{agent_id}:
+    get:
+      summary: Fetch one discoverable agent's record (Layer 1/2)
+      operationId: getDiscoveredAgent
+      security: []
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: requesting_organization_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DiscoveredAgent" }
+        "404":
+          description: Not discoverable by this requester (either it does not exist, is not active, or no trading relationship permits visibility)
+
+  /agents/{agent_id}/verify-sender:
+    get:
+      summary: Confirm a cryptographically-verified message's claimed sender is a registered, active agent (Layer 2 — Verified Identity, authoritative)
+      operationId: verifySender
+      security: []
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: claimed_organization_id
+          in: query
+          required: true
+          schema: { type: string }
+        - name: counterparty_organization_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Whether the claimed agent_id/organization_id pair is currently active and permitted to be seen by the counterparty
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentSenderVerificationOut" }
+        "404":
+          description: |
+            agent_id does not exist, is not `active`, does not belong to
+            claimed_organization_id, or no active trading relationship
+            exists between claimed_organization_id and
+            counterparty_organization_id (in either direction) —
+            deliberately not distinguished from each other in the error
+            body
+        "502":
+          description: network-api could not be reached to resolve the trading-relationship check (fails closed, never a best-effort accept)
+
+  /agents/{agent_id}/verification/start:
+    post:
+      summary: Begin endpoint-control and (if a signing key was registered) private-key-control verification (Layer 2)
+      operationId: startAgentVerification
+      description: |
+        Issues two separate, purpose-bound challenges (ADR-016) — never one
+        shared string doing double duty. Each challenge is bound to
+        organization_id, agent_id, the registered key's thumbprint (where
+        applicable), a fresh nonce, and an expiry. Requires the same
+        `manage_agents`-scoped bearer service credential as `POST /agents`
+        (registry-api's own `require_org_bearer`, never an organization's
+        network-api admin credential — these are different credentials for
+        different services).
+      security:
+        - ServiceCredential: []
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: organization_id
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VerificationStartOut" }
+        "401":
+          description: Missing/invalid bearer credential
+        "403":
+          description: Credential does not grant management of this organization_id's agents
+        "404":
+          description: Agent not found for this organization_id
+        "409":
+          description: Agent status is not `pending`, so a new verification round cannot start
+
+  /agents/{agent_id}/verification/confirm:
+    post:
+      summary: Complete endpoint-control and private-key-control verification, activating the agent (Layer 2)
+      operationId: confirmAgentVerification
+      description: |
+        Requires the same `manage_agents`-scoped bearer service credential
+        as `POST /agents` and `verification/start`. `key_proof_signature`
+        is required in the request body only when the agent registered a
+        `signing_public_key_jwk` at `POST /agents` — otherwise the body may
+        be omitted.
+      security:
+        - ServiceCredential: []
+      parameters:
+        - name: agent_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: organization_id
+          in: query
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key_proof_signature:
+                  type: string
+                  description: |
+                    Base64 (standard, padded) encoding of the raw Ed25519
+                    signature over the UTF-8 bytes of the pending
+                    `key_challenge` returned by `verification/start`,
+                    produced with the private key matching the agent's
+                    registered `signing_public_key_jwk`.
+      responses:
+        "200":
+          description: Agent transitions to `active` on success
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AgentManagementOut" }
+        "401":
+          description: Missing/invalid bearer credential
+        "403":
+          description: Credential does not grant management of this organization_id's agents
+        "404":
+          description: Agent not found for this organization_id
+        "409":
+          description: |
+            Agent status is not `pending`, no challenge is pending, the
+            challenge has expired, the served/signed challenge value did
+            not match, or the challenge was already consumed concurrently
+
+  /organizations/{organization_id}/jwks.json:
+    get:
+      summary: This organization's current, live root signing public keys (Layer 3 — Signing Delegation, root-key half)
+      operationId: getOrganizationJwks
+      description: |
+        Only currently-valid (unrevoked, within validity window) keys — a
+        revoked key is excluded immediately, not merely expired on schedule
+        (ADR-012/017). Cacheable for a bounded TTL; never served stale past it.
+      security: []
+      parameters:
+        - name: organization_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: A standard JWKS document
+
+  /organizations/{organization_id}/delegations.json:
+    get:
+      summary: This organization's current, live per-agent signing delegations (Layer 3 — Signing Delegation, delegated-key half)
+      operationId: listPublicDelegations
+      security: []
+      parameters:
+        - name: organization_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DelegationList" }
+
+  /organizations/{organization_id}/key-events.json:
+    get:
+      summary: This organization's own historical key/delegation lifecycle ledger (ADR-018) — read access for the organization itself
+      operationId: getKeyEvents
+      security:
+        - OrgScopedCredential: [read_key_events]
+      parameters:
+        - name: organization_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Missing/invalid credential, or this organization's auth_mode does not resolve
+        "403":
+          description: Credential valid for this organization but lacks the read_key_events scope
+
+  /organizations/{organization_id}/relationship-status/{counterparty_organization_id}:
+    get:
+      summary: Whether a trading relationship exists between two organizations (Layer 4 — Permission to Trade, eligibility only)
+      operationId: getRelationshipStatus
+      description: |
+        Answerable only to one of the two actual parties, or an AIMO operator
+        (ADR-019 section 6/8) — never an open third-party lookup. The caller
+        authenticates AS one named side of the question; an organization that
+        is neither party cannot phrase this query about two other
+        organizations at all. `exists: true` is eligibility only — it is never
+        sufficient, by itself, to authorize any specific transaction (see this
+        document's top-level four-layer table).
+
+        **Legacy-mode qualification:** this per-party binding is only as
+        strong as the organization's own `auth_mode`. An organization still
+        in `legacy_global_key` mode (the platform default prior to its own
+        ADR-019 onboarding) is authenticated with the single shared
+        `network_admin_api_key`, which carries no per-organization binding
+        at all — anyone holding that one key can query this endpoint for
+        any pair of `legacy_global_key` organizations, not only "their
+        own." This is pre-existing, shared behavior across every
+        organization-management endpoint (not introduced by this route),
+        and it closes entirely once an organization completes ADR-019
+        onboarding to `org_scoped_credential`.
+      security:
+        - OrgScopedCredential: [read_relationships]
+      parameters:
+        - name: organization_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: counterparty_organization_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RelationshipStatus" }
+        "401":
+          description: Caller is not a party to this relationship and is not an AIMO operator, or holds no valid credential for the named organization_id
+
+  /organizations/{organization_id}/admin-credential/rotate:
+    post:
+      summary: Self-service rotation of this organization's own scoped admin credential
+      operationId: rotateAdminCredential
+      description: |
+        Requires presenting the CURRENT valid credential — a revoked credential
+        cannot be used to mint its own replacement. Atomic: the old credential
+        is invalidated and the new one issued in the same transaction.
+      security:
+        - OrgScopedCredential: []
+      parameters:
+        - name: organization_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrganizationAdminCredential" }
+        "401":
+          description: Missing/invalid/revoked credential
+
+  /organizations/{organization_id}/members:
+    post:
+      summary: Add a member to this organization
+      operationId: addOrganizationMember
+      security:
+        - OrgScopedCredential: [manage_members]
+      parameters:
+        - name: organization_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [oidc_subject, email, display_name, role]
+              properties:
+                oidc_subject: { type: string }
+                email: { type: string }
+                display_name: { type: string }
+                role: { type: string }
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Missing/invalid credential, or this organization's auth_mode does not resolve
+        "403":
+          description: Credential valid for this organization but lacks the manage_members scope
+    get:
+      summary: List this organization's own members
+      operationId: listOrganizationMembers
+      security:
+        - OrgScopedCredential: [read_members]
+      parameters:
+        - name: organization_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Missing/invalid credential, or this organization's auth_mode does not resolve
+        "403":
+          description: Credential valid for this organization but lacks the read_members scope
+
+  /organizations/{organization_id}/service-credentials:
+    post:
+      summary: Mint a manage_agents-scoped service credential for registering/managing this organization's own agents with registry-api
+      operationId: issueServiceCredential
+      description: |
+        The minted credential is opaque and introspection-only (ADR-019 section
+        4) — it carries no locally-verifiable claims; registry-api always calls
+        network-api's own introspection endpoint to resolve it, so there is
+        nothing for a holder of any secret to forge locally. This is the
+        ServiceCredential used by `POST /agents` and the `verification/*`
+        operations above — a different credential from this one
+        (OrgScopedCredential), minted BY it.
+      security:
+        - OrgScopedCredential: [issue_service_credentials]
+      parameters:
+        - name: organization_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                scope: { type: string, default: manage_agents }
+                ttl_seconds: { type: integer, default: 3600 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string, description: "Prefixed `svc_`; opaque, introspection-only." }
+                  organization_id: { type: string }
+                  scope: { type: string }
+                  expires_in_seconds: { type: integer }
+        "401":
+          description: Missing/invalid credential, or this organization's auth_mode does not resolve
+        "403":
+          description: Credential valid for this organization but lacks the issue_service_credentials scope
+
+  /organizations/{organization_id}/signing-keys:
+    post:
+      summary: Register this organization's own root signing public key
+      operationId: registerSigningKey
+      security:
+        - OrgScopedCredential: [rotate_signing_keys]
+      parameters:
+        - name: organization_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kid, public_key_jwk]
+              properties:
+                kid: { type: string }
+                public_key_jwk:
+                  type: object
+                  description: RFC 8037 Ed25519 (OKP) public JWK.
+                validity_days: { type: integer, default: 365 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  organization_id: { type: string }
+                  kid: { type: string }
+                  status: { type: string }
+                  not_before: { type: string, format: date-time }
+                  not_after: { type: string, format: date-time }
+        "401":
+          description: Missing/invalid credential, or this organization's auth_mode does not resolve
+        "403":
+          description: Credential valid for this organization but lacks the rotate_signing_keys scope
+
+  /organizations/{organization_id}/signing-keys/{kid}/revoke:
+    post:
+      summary: Revoke one of this organization's own root signing keys
+      operationId: revokeSigningKey
+      security:
+        - OrgScopedCredential: [rotate_signing_keys]
+      parameters:
+        - name: organization_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: kid
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Missing/invalid credential, or this organization's auth_mode does not resolve
+        "403":
+          description: Credential valid for this organization but lacks the rotate_signing_keys scope
+        "404":
+          description: No such kid registered to this organization
+
+  /organizations/{organization_id}/delegations:
+    post:
+      summary: Publish a per-agent signing delegation, signed entirely within this organization's own trust boundary
+      operationId: publishDelegation
+      description: |
+        network-api never signs this token and never receives a private key —
+        it only cryptographically verifies the submitted token against this
+        organization's own currently-live root JWKS before storing and serving
+        it (ADR-017).
+      security:
+        - OrgScopedCredential: [publish_delegations]
+      parameters:
+        - name: organization_id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [jws]
+              properties:
+                jws:
+                  type: string
+                  description: The compact delegation JWS, signed with this organization's own current root key.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  organization_id: { type: string }
+                  agent_id: { type: string }
+                  delegated_kid: { type: string }
+                  audience: { type: string }
+                  scope: { type: object }
+                  jti: { type: string }
+                  not_before: { type: string, format: date-time }
+                  not_after: { type: string, format: date-time }
+                  status: { type: string }
+        "400":
+          description: The submitted JWS does not verify against this organization's own currently-live root JWKS, or is otherwise malformed
+        "401":
+          description: Missing/invalid credential, or this organization's auth_mode does not resolve
+        "403":
+          description: Credential valid for this organization but lacks the publish_delegations scope
+
+  /organizations/{organization_id}/delegations/{jti}/revoke:
+    post:
+      summary: Revoke a previously-published delegation
+      operationId: revokeDelegation
+      security:
+        - OrgScopedCredential: [revoke_delegations]
+      parameters:
+        - name: organization_id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: jti
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Missing/invalid credential, or this organization's auth_mode does not resolve
+        "403":
+          description: Credential valid for this organization but lacks the revoke_delegations scope
+        "404":
+          description: No such jti registered to this organization

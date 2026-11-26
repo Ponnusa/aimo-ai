@@ -230,6 +230,16 @@ class RelationshipOut(BaseModel):
     status: str
 
 
+class RelationshipStatusOut(BaseModel):
+    """Deliberately minimal (ADR-019 section 6/8): existence and status
+    only, never the relationship's internal id or timestamps — this is
+    the organization-facing shape, distinct from the internal
+    ``RelationshipOut`` the portal/registry-api receive."""
+
+    exists: bool
+    status: str | None
+
+
 class DelegationPublishIn(BaseModel):
     #: The compact JWS the organization constructed and signed entirely
     #: within its own trust boundary (M8 slice 2, ADR-017). network-api
@@ -1767,6 +1777,79 @@ def create_app() -> FastAPI:
                 )
                 for row in rows
             ]
+
+    # --- Organization-facing relationship-existence query (ADR-019 section 6/8) --
+
+    @app.get(
+        "/organizations/{organization_id}/relationship-status/{counterparty_organization_id}",
+        response_model=RelationshipStatusOut,
+    )
+    async def get_relationship_status(
+        organization_id: str,
+        counterparty_organization_id: str,
+        x_admin_key: str | None = Header(default=None),
+        x_operator_key: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
+    ) -> RelationshipStatusOut:
+        """Whether a trading relationship exists is commercially sensitive
+        -- it can reveal a competitor's supplier relationships (ADR-019
+        section 6). This is the organization-facing counterpart to the
+        internal-service-key-gated listing endpoints above, which remain
+        unchanged for the portal/registry-api's own trusted-backend use.
+
+        Answerable only to one of the two actual parties, or an AIMO
+        operator -- never an open third-party lookup. An operator-key
+        caller bypasses per-organization authority entirely (an operator
+        may ask about any pair). Otherwise, the caller must hold
+        ``organization_id``'s own authority (legacy admin key for a
+        ``legacy_global_key`` organization, or that organization's own
+        ``read_relationships``-scoped credential) -- this is what makes
+        the query answerable only to a party: the caller authenticates
+        AS one named side of the question being asked, never as an
+        unrelated third organization, which could only ever ask about
+        *its own* relationships, never fabricate a query about two other
+        organizations it has no authority over."""
+        is_operator = x_operator_key is not None and x_operator_key == settings.network_operator_key
+        async with session_factory() as session:
+            if not is_operator:
+                await _resolve_org_authority(
+                    session,
+                    organization_id=organization_id,
+                    required_scope="read_relationships",
+                    x_admin_key=x_admin_key,
+                    authorization=authorization,
+                    settings=settings,
+                )
+            elif await session.get(OrganizationRecord, organization_id) is None:
+                raise HTTPException(
+                    status_code=404, detail=f"Organization {organization_id!r} does not exist."
+                )
+            record = (
+                await session.execute(
+                    select(TradingRelationshipRecord).where(
+                        (
+                            (TradingRelationshipRecord.buyer_organization_id == organization_id)
+                            & (
+                                TradingRelationshipRecord.supplier_organization_id
+                                == counterparty_organization_id
+                            )
+                        )
+                        | (
+                            (
+                                TradingRelationshipRecord.buyer_organization_id
+                                == counterparty_organization_id
+                            )
+                            & (
+                                TradingRelationshipRecord.supplier_organization_id
+                                == organization_id
+                            )
+                        )
+                    )
+                )
+            ).scalar_one_or_none()
+            if record is None:
+                return RelationshipStatusOut(exists=False, status=None)
+            return RelationshipStatusOut(exists=True, status=record.status)
 
     return app
 
