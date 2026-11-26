@@ -362,6 +362,7 @@ name = "buyer-mcp"
 version = "0.1.0"
 source = { editable = "apps/buyer-mcp" }
 dependencies = [
+    { name = "agent-runtime" },
     { name = "aimo-food-wholesale" },
     { name = "alembic" },
     { name = "database" },
@@ -376,6 +377,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agent-runtime", editable = "packages/agent-runtime" },
     { name = "aimo-food-wholesale", editable = "industries/food-wholesale" },
     { name = "alembic", specifier = ">=1.13.2" },
     { name = "database", editable = "packages/database" },
@@ -2035,6 +2037,7 @@ version = "0.1.0"
 source = { editable = "apps/registry-api" }
 dependencies = [
     { name = "a2a-sdk", extra = ["fastapi", "http-server"] },
+    { name = "agent-runtime" },
     { name = "alembic" },
     { name = "database" },
     { name = "fastapi" },
@@ -2049,6 +2052,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", extras = ["http-server", "fastapi"], specifier = "==1.3.0" },
+    { name = "agent-runtime", editable = "packages/agent-runtime" },
     { name = "alembic", specifier = ">=1.13.2" },
     { name = "database", editable = "packages/database" },
     { name = "fastapi", specifier = ">=0.115.0" },
@@ -2384,6 +2388,7 @@ name = "supplier-mcp"
 version = "0.1.0"
 source = { editable = "apps/supplier-mcp" }
 dependencies = [
+    { name = "agent-runtime" },
     { name = "aimo-food-wholesale" },
     { name = "alembic" },
     { name = "business-system-integration" },
@@ -2399,6 +2404,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agent-runtime", editable = "packages/agent-runtime" },
     { name = "aimo-food-wholesale", editable = "industries/food-wholesale" },
     { name = "alembic", specifier = ">=1.13.2" },
     { name = "business-system-integration", editable = "packages/business-system-integration" },
