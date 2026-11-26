@@ -1492,10 +1492,12 @@ name = "network-api"
 version = "0.1.0"
 source = { editable = "apps/network-api" }
 dependencies = [
+    { name = "agent-runtime" },
     { name = "alembic" },
     { name = "database" },
     { name = "fastapi" },
     { name = "identity" },
+    { name = "message-integrity" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "trade-protocol" },
@@ -1504,10 +1506,12 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agent-runtime", editable = "packages/agent-runtime" },
     { name = "alembic", specifier = ">=1.13.2" },
     { name = "database", editable = "packages/database" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "identity", editable = "packages/identity" },
+    { name = "message-integrity", editable = "packages/message-integrity" },
     { name = "pydantic", specifier = ">=2.9.0" },
     { name = "pydantic-settings", specifier = ">=2.4.0" },
     { name = "trade-protocol", editable = "packages/trade-protocol" },

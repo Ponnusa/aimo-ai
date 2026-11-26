@@ -12,6 +12,8 @@ dependencies = [
   "database",
   "trade-protocol",
   "identity",
+  "message-integrity",
+  "agent-runtime",
 ]
 
 [build-system]
