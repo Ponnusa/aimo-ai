@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aimobrain.example/food-wholesale/quote/v0.1",
+  "title": "Food Wholesale Quote",
+  "type": "object",
+  "required": [
+    "schema",
+    "artifact_id",
+    "transaction_id",
+    "correlation_id",
+    "sender_agent_id",
+    "recipient_agent_id",
+    "organization_id",
+    "domain",
+    "type",
+    "version",
+    "proposal_id",
+    "content_hash",
+    "created_at",
+    "expires_at",
+    "payload"
+  ],
+  "properties": {
+    "schema": {
+      "type": "string"
+    },
+    "artifact_id": {
+      "type": "string"
+    },
+    "transaction_id": {
+      "type": "string",
+      "description": "Doubles as the stable negotiation ID shared by every proposal in this exchange."
+    },
+    "correlation_id": {
+      "type": "string"
+    },
+    "sender_agent_id": {
+      "type": "string"
+    },
+    "recipient_agent_id": {
+      "type": "string"
+    },
+    "organization_id": {
+      "type": "string"
+    },
+    "domain": {
+      "const": "food-wholesale"
+    },
+    "type": {
+      "const": "quote"
+    },
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "proposal_id": {
+      "type": "string"
+    },
+    "supersedes_proposal_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The RFQ's or prior counterproposal's proposal_id this quote responds to, if any."
+    },
+    "content_hash": {
+      "type": "string",
+      "description": "sha256 of the canonicalized payload, per trade_protocol.content_hash."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "payload": {
+      "type": "object",
+      "required": [
+        "lines",
+        "currency"
+      ],
+      "properties": {
+        "lines": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "product_ref",
+              "quantity",
+              "unit",
+              "unit_price"
+            ],
+            "properties": {
+              "product_ref": {
+                "type": "string"
+              },
+              "quantity": {
+                "type": "string"
+              },
+              "unit": {
+                "type": "string"
+              },
+              "unit_price": {
+                "type": "string",
+                "description": "decimal string, never a binary float"
+              },
+              "available_today": {
+                "type": "string"
+              },
+              "available_tomorrow": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "currency": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 3
+        },
+        "delivery_terms": {
+          "type": "string"
+        }
+      }
+    },
+    "proof": {
+      "type": "object",
+      "description": "Per-artifact JWS signature (M5.1, docs/DECISIONS.md ADR-012): the sender organization's Ed25519 signature over this artifact's canonicalized content plus iss/sub/aud/neg/typ/ver/hash/jti/exp claims. message_integrity.verify_artifact_proof requires its presence and validity before any business handler runs -- optional here because JSON Schema validates structure, not authentication.",
+      "required": [
+        "alg",
+        "kid",
+        "jws"
+      ],
+      "properties": {
+        "alg": {
+          "const": "EdDSA"
+        },
+        "kid": {
+          "type": "string"
+        },
+        "jws": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "additionalProperties": true
+}

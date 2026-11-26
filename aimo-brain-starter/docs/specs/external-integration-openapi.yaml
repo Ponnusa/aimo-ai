@@ -40,6 +40,15 @@ info:
     cross-language signature specification every signed artifact and delegation
     token in this contract uses.
 
+    This document is the HORIZONTAL (transport/auth/trust) contract only. The
+    VERTICAL, domain-specific business-artifact shapes exchanged once two
+    parties are discovering and verifying each other through the routes below
+    (request_for_quote, quote, accept_proposal, authorization_evidence,
+    order_commit_request, order_confirmation) are published separately at
+    `docs/specs/external-integration-artifacts/manifest.json` (M8 slice 5,
+    ADR-020 section 6) — an external integrator needs both documents, never
+    just this one.
+
     ## Freshness and fail-closed behavior
 
     Every read in this contract is subject to a bounded-TTL cache at most; a
