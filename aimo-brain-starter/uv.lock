@@ -2423,6 +2423,7 @@ name = "supplier-sandbox-erp"
 version = "0.1.0"
 source = { editable = "apps/supplier-sandbox-erp" }
 dependencies = [
+    { name = "agent-runtime" },
     { name = "alembic" },
     { name = "database" },
     { name = "fastapi" },
@@ -2434,6 +2435,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "agent-runtime", editable = "packages/agent-runtime" },
     { name = "alembic", specifier = ">=1.13.2" },
     { name = "database", editable = "packages/database" },
     { name = "fastapi", specifier = ">=0.115.0" },
