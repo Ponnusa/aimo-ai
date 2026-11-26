@@ -186,6 +186,7 @@ jobs:
             buyer-agent,
             supplier-agent,
             registry-api,
+            network-api,
             buyer-mcp,
             supplier-mcp,
             supplier-sandbox-erp,
