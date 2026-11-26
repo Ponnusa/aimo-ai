@@ -128,6 +128,7 @@ def _build_network_app(*, database_url: str):
         OrganizationKidNamespaceRecord,
         OrganizationRecord,
         OrganizationSigningKeyRecord,
+        ServiceCredentialIssuanceRecord,
         TradingRelationshipRecord,
     )
 
@@ -146,6 +147,7 @@ def _build_network_app(*, database_url: str):
         AgentSigningDelegationRecord,
         KeyLifecycleEventRecord,
         KeyEventAccessLogRecord,
+        ServiceCredentialIssuanceRecord,
     )
 
 

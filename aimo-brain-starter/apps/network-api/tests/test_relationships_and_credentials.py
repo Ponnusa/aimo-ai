@@ -73,12 +73,25 @@ async def test_issued_credential_verifies_and_scopes_to_the_org() -> None:
     assert body["organization_id"] == "org_fictional_bistro_01"
     assert body["scope"] == "manage_agents"
 
-    claims = verify_service_credential(
-        body["token"],
-        signing_secret=settings.service_credential_signing_secret,
-        required_scope="manage_agents",
-    )
-    assert claims.organization_id == "org_fictional_bistro_01"
+    # ADR-019 section 4: manage_agents credentials are now the opaque,
+    # introspection-only reference -- never locally verifiable, by
+    # design. Confirm its shape and that /introspect is the only way to
+    # confirm it, rather than asserting the old self-contained format.
+    assert body["token"].startswith("svc_")
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        introspect_response = await client.post(
+            "/introspect",
+            json={
+                "token": body["token"],
+                "expected_organization_id": "org_fictional_bistro_01",
+                "expected_scope": "manage_agents",
+            },
+            headers={"X-Internal-Service-Key": settings.network_internal_service_key},
+        )
+    assert introspect_response.status_code == 200
+    introspected = introspect_response.json()
+    assert introspected["active"] is True
+    assert introspected["organization_id"] == "org_fictional_bistro_01"
     await engine.dispose()
 
 

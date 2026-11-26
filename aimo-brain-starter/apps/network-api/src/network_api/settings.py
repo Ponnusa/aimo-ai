@@ -57,6 +57,32 @@ class NetworkApiSettings(ServiceSettings):
         validation_alias="THUMBPRINT_RESERVATION_GRACE_PERIOD_SECONDS",
     )
 
+    # M8 slice 4 (ADR-019 section 3): authenticates the bootstrap/
+    # recovery sequence ONLY -- organization creation, bootstrapping an
+    # organization to auth_mode="org_scoped_credential", and forced
+    # recovery actions. Deliberately a THIRD secret, distinct from both
+    # network_admin_api_key (the legacy per-call authority it is slowly
+    # being separated from) and any organization's own scoped credential
+    # (the new authority it issues) -- holding one must never imply
+    # holding another.
+    network_operator_key: str = Field(
+        default="dev-only-operator-key-change-me",
+        validation_alias="NETWORK_OPERATOR_KEY",
+    )
+
+    # M8 slice 4 (ADR-019 sections 1, 3, 7): the master gate on bootstrapping
+    # ANY new organization to auth_mode="org_scoped_credential". Defaults
+    # false in every environment, including CI -- enabling it is a
+    # separate deployment decision made after the operator-authentication,
+    # recovery, TLS and introspection configuration it depends on is
+    # actually in place, never an automatic consequence of this slice
+    # merging. Disabling it after an organization is already bootstrapped
+    # changes nothing about that organization -- see ADR-019 section 7.
+    external_onboarding_enabled: bool = Field(
+        default=False,
+        validation_alias="EXTERNAL_ONBOARDING_ENABLED",
+    )
+
 
 @lru_cache
 def get_settings() -> NetworkApiSettings:
