@@ -79,6 +79,7 @@ def _build_network_app(database_url: str):
         OrganizationMemberRecord,
         OrganizationRecord,
         OrganizationSigningKeyRecord,
+        ServiceCredentialIssuanceRecord,
     )
 
     network_settings_module.get_settings.cache_clear()
@@ -91,6 +92,7 @@ def _build_network_app(database_url: str):
         OrganizationMemberRecord,
         KeyLifecycleEventRecord,
         KeyEventAccessLogRecord,
+        ServiceCredentialIssuanceRecord,
     )
 
 

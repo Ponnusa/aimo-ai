@@ -58,7 +58,11 @@ async def _create_tables(engine, *models) -> None:
 def _build_network_app(*, database_url: str):
     import network_api.app as network_app_module
     import network_api.settings as network_settings_module
-    from network_api.models import OrganizationRecord, TradingRelationshipRecord
+    from network_api.models import (
+        OrganizationRecord,
+        ServiceCredentialIssuanceRecord,
+        TradingRelationshipRecord,
+    )
 
     os.environ["DATABASE_URL"] = database_url
     os.environ["NETWORK_ADMIN_API_KEY"] = ADMIN_KEY
@@ -67,7 +71,7 @@ def _build_network_app(*, database_url: str):
     network_settings_module.get_settings.cache_clear()
 
     app = network_app_module.create_app()
-    return app, (OrganizationRecord, TradingRelationshipRecord)
+    return app, (OrganizationRecord, ServiceCredentialIssuanceRecord, TradingRelationshipRecord)
 
 
 def _build_registry_app(*, database_url: str, network_api_url: str):

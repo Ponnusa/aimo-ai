@@ -39,7 +39,12 @@ from registry_api.models import (
     RegistryAuditEventRecord,
     RegistryOrganizationPolicyRecord,
 )
-from registry_api.network_client import RelationshipLookupError, has_active_relationship
+from registry_api.network_client import (
+    IntrospectionError,
+    RelationshipLookupError,
+    has_active_relationship,
+    introspect_credential,
+)
 from registry_api.settings import get_settings
 from sqlalchemy import select, text, update
 from sqlalchemy.engine import CursorResult
@@ -231,12 +236,49 @@ def create_app() -> FastAPI:
     engine = new_engine(settings.registry_database_url)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-    def require_org_bearer(
+    async def require_org_bearer(
         organization_id: str, authorization: str | None
     ) -> ServiceCredentialClaims:
         if authorization is None or not authorization.startswith("Bearer "):
             raise HTTPException(status_code=401, detail="Missing bearer service credential.")
         token = authorization.removeprefix("Bearer ")
+
+        # ADR-019 section 4: a "svc_"-prefixed token is the new opaque,
+        # introspection-only credential -- never evaluated locally, no
+        # matter how it's shaped. Every other token keeps using the
+        # existing self-contained HMAC verification (M0-M8-slice-3
+        # agents and legacy-mode organizations are unaffected).
+        if token.startswith("svc_"):
+            try:
+                result = await introspect_credential(
+                    network_api_url=settings.network_api_url,
+                    internal_service_key=settings.network_internal_service_key,
+                    token=token,
+                    expected_organization_id=organization_id,
+                    expected_scope=AGENT_MANAGEMENT_SCOPE,
+                )
+            except IntrospectionError as exc:
+                # Fail closed on timeout, malformed response, or
+                # network-api being unreachable -- never a best-effort
+                # accept (ADR-019 section 4).
+                raise HTTPException(
+                    status_code=503, detail=f"Could not confirm credential: {exc}"
+                ) from exc
+            if not result.get("active"):
+                raise HTTPException(status_code=401, detail="Credential is not active.")
+            if result.get("organization_id") != organization_id:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Credential does not grant management of this organization's agents.",
+                )
+            return ServiceCredentialClaims(
+                organization_id=result["organization_id"],
+                scope=result["scope"],
+                issued_at=0,
+                expires_at=0,
+                agent_id=result.get("agent_id"),
+            )
+
         try:
             claims = verify_service_credential(
                 token,
@@ -383,7 +425,7 @@ def create_app() -> FastAPI:
     async def register_agent(
         body: RegisterAgentIn, authorization: str | None = Header(default=None)
     ) -> AgentManagementOut:
-        require_org_bearer(body.organization_id, authorization)
+        await require_org_bearer(body.organization_id, authorization)
 
         if body.signing_public_key_jwk is not None:
             try:
@@ -653,7 +695,7 @@ def create_app() -> FastAPI:
     async def start_verification(
         agent_id: str, organization_id: str, authorization: str | None = Header(default=None)
     ) -> VerificationStartOut:
-        require_org_bearer(organization_id, authorization)
+        await require_org_bearer(organization_id, authorization)
         async with session_factory() as session:
             record = await _get_owned_agent(session, agent_id, organization_id)
             if record.status == "revoked":
@@ -727,7 +769,7 @@ def create_app() -> FastAPI:
         authorization: str | None = Header(default=None),
         body: ConfirmVerificationIn | None = None,
     ) -> AgentManagementOut:
-        require_org_bearer(organization_id, authorization)
+        await require_org_bearer(organization_id, authorization)
         async with session_factory() as session:
             record = await _get_owned_agent(session, agent_id, organization_id)
             if record.status != "pending":
@@ -918,7 +960,7 @@ def create_app() -> FastAPI:
         new_status: str,
         action: str,
     ) -> AgentManagementOut:
-        require_org_bearer(organization_id, authorization)
+        await require_org_bearer(organization_id, authorization)
         async with session_factory() as session:
             record = await _get_owned_agent(session, agent_id, organization_id)
             if record.status not in _ALLOWED_TRANSITIONS[action]:
@@ -967,7 +1009,7 @@ def create_app() -> FastAPI:
     async def list_owned_agents(
         organization_id: str, authorization: str | None = Header(default=None)
     ) -> list[AgentManagementOut]:
-        require_org_bearer(organization_id, authorization)
+        await require_org_bearer(organization_id, authorization)
         async with session_factory() as session:
             rows = (
                 (

@@ -41,6 +41,91 @@ class OrganizationRecord(Base):
     #: never consulted for this decision).
     oidc_issuer: Mapped[str | None] = mapped_column(String, nullable=True)
     oidc_tenant_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    #: M8 slice 4 (ADR-019 section 1): which authority this organization's
+    #: management endpoints accept. Server-owned -- set only by the
+    #: bootstrap/recovery endpoints below, never by any field in an
+    #: ordinary management request. ``None``/unrecognized is a deny, never
+    #: a fallback to "legacy_global_key" -- see ``_resolve_org_authority``.
+    auth_mode: Mapped[str] = mapped_column(
+        String, nullable=False, server_default=text("'legacy_global_key'")
+    )
+
+
+#: ADR-019 section 1. Not a tier system -- exactly one value is ever
+#: active for a given organization, resolved server-side.
+AUTH_MODES = ("legacy_global_key", "org_scoped_credential")
+
+#: ADR-019 section 2. Enumerated, not "everything the global key could
+#: do" -- platform bootstrap and auth_mode changes are deliberately
+#: absent from this set and unreachable via any credential carrying it.
+ORG_ADMIN_CREDENTIAL_SCOPES = (
+    "manage_members",
+    "issue_service_credentials",
+    "rotate_signing_keys",
+    "publish_delegations",
+    "revoke_delegations",
+)
+
+
+class OrganizationAdminCredentialRecord(Base):
+    """An organization's own scoped admin credential (ADR-019 section 2)
+    -- a v1 machine-admin mechanism, not human OIDC or member-level RBAC.
+    Only a salted hash of the bearer secret is ever stored; the plaintext
+    is returned exactly once, in the response that creates or rotates
+    this row, and is never recoverable from this table afterward."""
+
+    __tablename__ = "organization_admin_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    organization_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    credential_hash: Mapped[str] = mapped_column(String, nullable=False)
+    credential_salt: Mapped[str] = mapped_column(String, nullable=False)
+    #: JSON list drawn from ORG_ADMIN_CREDENTIAL_SCOPES.
+    scopes_json: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="active")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: Which recovery/rotation event produced the revocation, if any --
+    #: "self_rotated" | "self_revoked" | "operator_forced" | None.
+    revoked_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class OrganizationLifecycleAuditEventRecord(Base):
+    """Append-only audit trail for the ONE class of action that changes
+    an organization's ``auth_mode`` or forcibly touches its admin
+    credential from outside that organization's own authority (ADR-019
+    section 3). Every row is attributable to the distinct bootstrap/
+    recovery authority, never to the global admin key or any
+    organization's own credential."""
+
+    __tablename__ = "organization_lifecycle_audit_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    organization_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+
+class ServiceCredentialIssuanceRecord(Base):
+    """An opaque, introspection-only ``manage_agents`` service credential
+    (ADR-019 section 4) -- the bearer value handed to the caller carries
+    no locally-verifiable claims, only this row's ``reference_id``.
+    registry-api never evaluates one of these locally; it always calls
+    this service's ``/introspect`` endpoint, which answers from this row
+    alone. Only a salted hash of the bearer value is stored."""
+
+    __tablename__ = "service_credential_issuances"
+
+    reference_id: Mapped[str] = mapped_column(String, primary_key=True)
+    credential_hash: Mapped[str] = mapped_column(String, nullable=False)
+    credential_salt: Mapped[str] = mapped_column(String, nullable=False)
+    organization_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    scope: Mapped[str] = mapped_column(String, nullable=False)
+    agent_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    issued_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class OrganizationMemberRecord(Base):
