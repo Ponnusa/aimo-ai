@@ -15,6 +15,7 @@ import { buildEnvelope } from "./envelope.js";
 import { contentHash } from "./contentHash.js";
 import { evaluateBuyerPolicy, type QuoteLine } from "./policy.js";
 import { verifyInboundArtifact } from "./verify.js";
+import { checkOrderConfirmationBinding, checkProposedAgreementBinding } from "./binding.js";
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -239,6 +240,14 @@ async function main(): Promise<void> {
       protocolVersion: "v1",
       expectedNetworkAudience: networkAudience,
     });
+    // A valid signature establishes WHO signed this artifact -- not that
+    // it belongs to the proposal/terms this buyer actually accepted.
+    // Checked against the buyer's OWN held state before anything past
+    // this point is sent (merge review fix: binding verification).
+    checkProposedAgreementBinding(proposedAgreement as any, {
+      expectedProposalId: quoteArtifact.proposal_id,
+      expectedContentHash: quoteArtifact.content_hash,
+    });
 
     // --- Own authorization_evidence, bound to the agreed content_hash -
     const ownEvidence = buildEnvelope({
@@ -321,6 +330,13 @@ async function main(): Promise<void> {
       protocolVersion: "v1",
       expectedNetworkAudience: networkAudience,
     });
+    // A valid signature on an order_confirmation does not by itself
+    // prove it completes THIS commitment -- checked against the exact
+    // agreement id and idempotency_key this buyer itself sent.
+    checkOrderConfirmationBinding(confirmation as any, {
+      expectedAgreementId: transactionId,
+      expectedIdempotencyKey: idempotencyKey,
+    });
 
     let replayConfirmation: unknown;
     if (process.env.REPLAY_ORDER_COMMIT === "true") {
@@ -351,6 +367,10 @@ async function main(): Promise<void> {
         expectedRecipientOrganizationId: buyerOrganizationId,
         protocolVersion: "v1",
         expectedNetworkAudience: networkAudience,
+      });
+      checkOrderConfirmationBinding(replayResult as any, {
+        expectedAgreementId: transactionId,
+        expectedIdempotencyKey: idempotencyKey,
       });
       replayConfirmation = (replayResult as any).payload;
     }
