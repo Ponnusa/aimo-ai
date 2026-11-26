@@ -30,7 +30,12 @@ export class DelegationNotLiveError extends Error {}
 export async function verifyInboundArtifact(
   client: ExternalContractClient,
   artifact: Record<string, unknown> & { proof?: { kid: string; jws: string } },
-  opts: { issuerOrganizationId: string; expectedRecipientOrganizationId: string; protocolVersion: string },
+  opts: {
+    issuerOrganizationId: string;
+    expectedRecipientOrganizationId: string;
+    protocolVersion: string;
+    expectedNetworkAudience: string;
+  },
 ): Promise<VerifiedProof> {
   const proof = artifact.proof;
   if (!proof?.jws) throw new Error("Artifact carries no proof.");
@@ -78,8 +83,14 @@ export async function verifyInboundArtifact(
   }
   const rootPublicKey = publicKeyFromJwk(rootJwk);
 
+  // The delegation's own `aud` is the network/environment identifier
+  // (ADR-017) -- checking it stops a delegation issued for a different
+  // network/environment from being accepted here, a distinct check from
+  // the artifact proof's own `aud` (the recipient_organization_id,
+  // checked separately below by verifyArtifactProofWithKnownKey).
   const verifiedDelegation = verifyDelegationToken(matchedDelegationToken, rootPublicKey, {
     expectedOrganizationId: opts.issuerOrganizationId,
+    expectedAudience: opts.expectedNetworkAudience,
   });
 
   if (!scopeAllows(verifiedDelegation.scope, artifact.type as string, opts.protocolVersion)) {

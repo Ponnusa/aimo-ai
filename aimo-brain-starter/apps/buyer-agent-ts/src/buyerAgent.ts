@@ -29,10 +29,11 @@ async function main(): Promise<void> {
   const supplierOrganizationId = requireEnv("SUPPLIER_ORGANIZATION_ID");
   const orgScopedCredential = requireEnv("ORG_SCOPED_CREDENTIAL");
   const buyerAgentId = requireEnv("BUYER_AGENT_ID");
-  const supplierA2aUrl = requireEnv("SUPPLIER_A2A_URL");
+  const supplierAgentId = requireEnv("SUPPLIER_AGENT_ID");
   const selfPort = Number.parseInt(requireEnv("BUYER_SELF_PORT"), 10);
   const agentPrivateJwk = JSON.parse(requireEnv("AGENT_PRIVATE_KEY_JWK"));
   const delegatedKid = requireEnv("DELEGATED_KID");
+  const networkAudience = requireEnv("NETWORK_AUDIENCE");
 
   const agentPrivateKey = privateKeyFromJwk(agentPrivateJwk);
   const client = new ExternalContractClient({ registryApiUrl, networkApiUrl });
@@ -76,9 +77,27 @@ async function main(): Promise<void> {
       throw new Error(`No active trading relationship with ${supplierOrganizationId}: ${JSON.stringify(relationship)}`);
     }
 
+    // --- Layer 1/2: discover the supplier through registry-api itself,
+    // never a hardcoded/configured endpoint -- the a2a_endpoint_url this
+    // returns is authoritative precisely BECAUSE it comes from OUR OWN
+    // configured, trusted registryApiUrl (the same trust anchor
+    // verify.ts/trustExtension.ts already resolve against), not from a
+    // self-published Agent Card descriptor a counterparty could forge.
+    // "status: active" on the returned record additionally reflects
+    // registry-api's own prior endpoint/key-control verification of the
+    // supplier (ADR-015/016) -- this is Layer 2, not merely Layer 1.
+    const discovered = await client.discoverAgents(buyerOrganizationId);
+    const supplierRecord = discovered.find(
+      (a) => a.agent_id === supplierAgentId && a.organization_id === supplierOrganizationId,
+    );
+    if (!supplierRecord || supplierRecord.status !== "active") {
+      throw new Error(
+        `Supplier agent ${supplierAgentId} not discoverable as active via registry-api: ${JSON.stringify(discovered)}`,
+      );
+    }
+
     // --- Negotiation: signed request_for_quote -> verified quote ------
-    const supplierAgent = await connectToAgent(supplierA2aUrl);
-    const supplierAgentId = requireEnv("SUPPLIER_AGENT_ID");
+    const supplierAgent = await connectToAgent(supplierRecord.a2a_endpoint_url);
     const transactionId = randomUUID();
 
     const rfq = buildEnvelope({
@@ -90,7 +109,13 @@ async function main(): Promise<void> {
       version: 1,
       proposalId: randomUUID(),
       payload: {
-        lines: [{ product_query: "lactose-free milk", quantity: "100", unit: "L" }],
+        lines: [
+          {
+            product_query: "lactose-free milk",
+            quantity: process.env.RFQ_QUANTITY ?? "100",
+            unit: "L",
+          },
+        ],
         delivery_location_ref: "loc-external-1",
       },
       validitySeconds: 86400,
@@ -116,7 +141,64 @@ async function main(): Promise<void> {
       issuerOrganizationId: supplierOrganizationId,
       expectedRecipientOrganizationId: buyerOrganizationId,
       protocolVersion: "v1",
+      expectedNetworkAudience: networkAudience,
     });
+
+    // ADR-020 section 9, test 2 (merge-review fix 3): this first quote
+    // exchange is what WARMS the real supplier's JWKS/delegation cache
+    // for this organization (apps/supplier-agent/src/supplier_agent/
+    // message_auth.py's HttpJwksResolver/HttpDelegationResolver, 300s
+    // default TTL). With a cache now warm, revoke the delegation and
+    // send a SECOND, independent request_for_quote (non-commitment-
+    // adjacent -- never force-fresh) to observe the real receiver-side
+    // behavior live, rather than asserting it from this side.
+    if (process.env.TTL_CACHE_PROBE === "true") {
+      const delegationJti = requireEnv("DELEGATION_JTI");
+      await client.revokeDelegation(buyerOrganizationId, orgScopedCredential, delegationJti);
+
+      const secondTransactionId = randomUUID();
+      const secondRfq = buildEnvelope({
+        transactionId: secondTransactionId,
+        senderAgentId: buyerAgentId,
+        recipientAgentId: supplierAgentId,
+        organizationId: buyerOrganizationId,
+        artifactType: "request_for_quote",
+        version: 1,
+        proposalId: randomUUID(),
+        payload: {
+          lines: [{ product_query: "lactose-free milk", quantity: "100", unit: "L" }],
+          delivery_location_ref: "loc-external-1",
+        },
+        validitySeconds: 86400,
+      });
+      const signedSecondRfq = signArtifact(secondRfq as any, {
+        privateKey: agentPrivateKey,
+        kid: delegatedKid,
+        organizationId: buyerOrganizationId,
+        agentId: buyerAgentId,
+        recipientOrganizationId: supplierOrganizationId,
+      });
+
+      try {
+        const { responsePayload: secondQuote } = await sendDataMessage(
+          supplierAgent,
+          signedSecondRfq,
+          buyerAgentId,
+        );
+        await verifyInboundArtifact(client, secondQuote as any, {
+          issuerOrganizationId: supplierOrganizationId,
+          expectedRecipientOrganizationId: buyerOrganizationId,
+          protocolVersion: "v1",
+          expectedNetworkAudience: networkAudience,
+        });
+        console.log(JSON.stringify({ outcome: "ttl_probe_accepted_despite_revocation" }));
+      } catch (exc) {
+        console.log(
+          JSON.stringify({ outcome: "ttl_probe_rejected_despite_cache", detail: String(exc) }),
+        );
+      }
+      return;
+    }
 
     const recomputedHash = contentHash(quoteArtifact.payload as unknown as Record<string, unknown>);
     if (recomputedHash !== quoteArtifact.content_hash) {
@@ -155,6 +237,7 @@ async function main(): Promise<void> {
       issuerOrganizationId: supplierOrganizationId,
       expectedRecipientOrganizationId: buyerOrganizationId,
       protocolVersion: "v1",
+      expectedNetworkAudience: networkAudience,
     });
 
     // --- Own authorization_evidence, bound to the agreed content_hash -
@@ -191,6 +274,7 @@ async function main(): Promise<void> {
       issuerOrganizationId: supplierOrganizationId,
       expectedRecipientOrganizationId: buyerOrganizationId,
       protocolVersion: "v1",
+      expectedNetworkAudience: networkAudience,
     });
     const counterpartyPayload = (counterpartyEvidence as any).payload;
     if (!counterpartyPayload.allow) {
@@ -235,6 +319,7 @@ async function main(): Promise<void> {
       issuerOrganizationId: supplierOrganizationId,
       expectedRecipientOrganizationId: buyerOrganizationId,
       protocolVersion: "v1",
+      expectedNetworkAudience: networkAudience,
     });
 
     let replayConfirmation: unknown;
@@ -265,6 +350,7 @@ async function main(): Promise<void> {
         issuerOrganizationId: supplierOrganizationId,
         expectedRecipientOrganizationId: buyerOrganizationId,
         protocolVersion: "v1",
+        expectedNetworkAudience: networkAudience,
       });
       replayConfirmation = (replayResult as any).payload;
     }

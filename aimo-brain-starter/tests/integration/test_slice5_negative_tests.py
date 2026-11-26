@@ -138,12 +138,12 @@ async def test_suspended_relationship_blocks_commitment_without_fabricating_a_st
             "SUPPLIER_ORGANIZATION_ID": SUPPLIER_ORG,
             "ORG_SCOPED_CREDENTIAL": org_credential,
             "BUYER_AGENT_ID": buyer_agent_id,
-            "SUPPLIER_A2A_URL": stack["supplier"].base_url,
             "SUPPLIER_AGENT_ID": SUPPLIER_AGENT_ID,
             "BUYER_SELF_PORT": str(buyer_port),
             "AGENT_PRIVATE_KEY_JWK": json.dumps(prov["agentPrivateJwk"]),
             "AGENT_PUBLIC_KEY_JWK": json.dumps(prov["agentPublicJwk"]),
             "DELEGATED_KID": prov["delegatedKid"],
+            "NETWORK_AUDIENCE": NETWORK_AUDIENCE,
         }
     )
 
@@ -202,12 +202,12 @@ async def test_revoked_delegation_is_rejected_immediately_for_commitment_adjacen
             "SUPPLIER_ORGANIZATION_ID": SUPPLIER_ORG,
             "ORG_SCOPED_CREDENTIAL": org_credential,
             "BUYER_AGENT_ID": buyer_agent_id,
-            "SUPPLIER_A2A_URL": stack["supplier"].base_url,
             "SUPPLIER_AGENT_ID": SUPPLIER_AGENT_ID,
             "BUYER_SELF_PORT": str(buyer_port),
             "AGENT_PRIVATE_KEY_JWK": json.dumps(prov["agentPrivateJwk"]),
             "AGENT_PUBLIC_KEY_JWK": json.dumps(prov["agentPublicJwk"]),
             "DELEGATED_KID": prov["delegatedKid"],
+            "NETWORK_AUDIENCE": NETWORK_AUDIENCE,
             "DELEGATION_JTI": prov["delegationJti"],
             "REVOKE_DELEGATION_BEFORE_COMMIT": "true",
         }
@@ -225,4 +225,110 @@ async def test_revoked_delegation_is_rejected_immediately_for_commitment_adjacen
     rows = await _order_rows(stack["supplier_db"])
     assert len(rows) == 0, (
         f"expected no order rows after a revoked-delegation commit attempt, found {len(rows)}"
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_revoked_delegation_ttl_bounded_for_non_commitment_adjacent_artifact(
+    full_stack, ts_installed
+):
+    """Merge-review fix 3: tests the RECEIVER side (the real
+    supplier-agent's own HttpJwksResolver/HttpDelegationResolver), not
+    the buyer's. Ground truth, read directly from
+    apps/supplier-agent/src/supplier_agent/message_auth.py and
+    packages/message-integrity/src/message_integrity/
+    delegated_verification.py before writing this assertion:
+    force_fresh is derived from the artifact's own claimed `typ` being
+    in COMMITMENT_ADJACENT_ARTIFACT_TYPES; request_for_quote is NOT in
+    that set, and HttpJwksResolver/HttpDelegationResolver cache per
+    organization for a 300s default TTL when force_fresh=False. So a
+    revocation genuinely IS only visible after that TTL for this
+    artifact type, PROVIDED a cache entry already exists -- this test
+    warms it with one real exchange first (TTL_CACHE_PROBE=true in
+    buyerAgent.ts does exactly this), then revokes, then sends a second,
+    independent request_for_quote and expects it to still be ACCEPTED
+    within the TTL window, contrasting with the already-covered
+    immediate-rejection case for commitment-adjacent types."""
+    _, npx = _npm_and_npx()
+    stack = full_stack
+    org_credential, buyer_agent_id, prov = await _provision_buyer(stack, npx)
+
+    buyer_port = find_free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "REGISTRY_API_URL": stack["registry"].base_url,
+            "NETWORK_API_URL": stack["network"].base_url,
+            "BUYER_ORGANIZATION_ID": BUYER_ORG,
+            "SUPPLIER_ORGANIZATION_ID": SUPPLIER_ORG,
+            "ORG_SCOPED_CREDENTIAL": org_credential,
+            "BUYER_AGENT_ID": buyer_agent_id,
+            "SUPPLIER_AGENT_ID": SUPPLIER_AGENT_ID,
+            "BUYER_SELF_PORT": str(buyer_port),
+            "AGENT_PRIVATE_KEY_JWK": json.dumps(prov["agentPrivateJwk"]),
+            "AGENT_PUBLIC_KEY_JWK": json.dumps(prov["agentPublicJwk"]),
+            "DELEGATED_KID": prov["delegatedKid"],
+            "NETWORK_AUDIENCE": NETWORK_AUDIENCE,
+            "DELEGATION_JTI": prov["delegationJti"],
+            "TTL_CACHE_PROBE": "true",
+        }
+    )
+    result = _run_node(npx, "src/buyerAgent.ts", env)
+    assert result.returncode == 0, f"buyer agent process failed:\n{result.stdout}\n{result.stderr}"
+
+    output = json.loads(result.stdout.strip().splitlines()[-1])
+    # Ground truth, not an assumption: the real supplier DOES cache for
+    # this artifact type, so the second (post-revocation, within-TTL)
+    # request_for_quote is accepted -- this is the correct, documented
+    # behavior for a non-commitment-adjacent artifact type, not a bug.
+    assert output["outcome"] == "ttl_probe_accepted_despite_revocation", output
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_buyer_policy_denies_an_over_limit_quote_live(full_stack, ts_installed):
+    """Merge-review fix 1: the buyer's own policy deny branch must be
+    driven live against the real supplier, not merely unit-tested. The
+    real supplier quotes back the exact requested quantity (see
+    apps/supplier-agent/src/supplier_agent/negotiation.py's
+    handle_request_for_quote, which echoes `line["quantity"]` verbatim
+    into the quote), so requesting more than policy.ts's
+    POLICY_LIMITS.maxTotalQuantity (500) against the real, unmodified
+    supplier reliably reaches the real deny branch -- never an
+    authorization_evidence with allow=true, never an
+    order_commit_request at all."""
+    _, npx = _npm_and_npx()
+    stack = full_stack
+    org_credential, buyer_agent_id, prov = await _provision_buyer(stack, npx)
+
+    buyer_port = find_free_port()
+    env = dict(os.environ)
+    env.update(
+        {
+            "REGISTRY_API_URL": stack["registry"].base_url,
+            "NETWORK_API_URL": stack["network"].base_url,
+            "BUYER_ORGANIZATION_ID": BUYER_ORG,
+            "SUPPLIER_ORGANIZATION_ID": SUPPLIER_ORG,
+            "ORG_SCOPED_CREDENTIAL": org_credential,
+            "BUYER_AGENT_ID": buyer_agent_id,
+            "SUPPLIER_AGENT_ID": SUPPLIER_AGENT_ID,
+            "BUYER_SELF_PORT": str(buyer_port),
+            "AGENT_PRIVATE_KEY_JWK": json.dumps(prov["agentPrivateJwk"]),
+            "AGENT_PUBLIC_KEY_JWK": json.dumps(prov["agentPublicJwk"]),
+            "DELEGATED_KID": prov["delegatedKid"],
+            "NETWORK_AUDIENCE": NETWORK_AUDIENCE,
+            "RFQ_QUANTITY": "600",  # exceeds POLICY_LIMITS.maxTotalQuantity (500)
+        }
+    )
+    result = _run_node(npx, "src/buyerAgent.ts", env)
+    assert result.returncode == 0, f"buyer agent process failed:\n{result.stdout}\n{result.stderr}"
+
+    output = json.loads(result.stdout.strip().splitlines()[-1])
+    assert output["outcome"] == "denied_by_own_policy", output
+    assert "500" in output["reason"] or "maximum" in output["reason"], output
+
+    rows = await _order_rows(stack["supplier_db"])
+    assert len(rows) == 0, (
+        f"expected no order rows after a live own-policy denial, found {len(rows)}"
     )

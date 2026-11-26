@@ -21,7 +21,12 @@ from food_wholesale.authorization import (
     build_order_commit_request,
     build_order_confirmation,
 )
-from food_wholesale.negotiation import build_accept_proposal, build_quote, build_rfq
+from food_wholesale.negotiation import (
+    build_accept_proposal,
+    build_proposed_agreement,
+    build_quote,
+    build_rfq,
+)
 
 MANIFEST_DIR = Path(__file__).parents[2] / "docs" / "specs" / "external-integration-artifacts"
 
@@ -38,6 +43,7 @@ def test_manifest_is_valid_json_and_lists_six_artifacts():
         "request_for_quote",
         "quote",
         "accept_proposal",
+        "proposed_agreement",
         "authorization_evidence",
         "order_commit_request",
         "order_confirmation",
@@ -52,6 +58,7 @@ def test_published_schemas_are_valid_json_schema():
         "request_for_quote.schema.json",
         "quote.schema.json",
         "accept_proposal.schema.json",
+        "proposed_agreement.schema.json",
         "authorization_evidence.schema.json",
         "order_commit_request.schema.json",
         "order_confirmation.schema.json",
@@ -112,6 +119,31 @@ def test_published_accept_proposal_schema_matches_real_wire_artifact():
         accepted_content_hash="deadbeef",
     )
     jsonschema.validate(artifact, _published_schema("accept_proposal.schema.json"))
+
+
+def test_published_proposed_agreement_schema_matches_real_wire_artifact():
+    artifact = build_proposed_agreement(
+        artifact_id="artifact-3b",
+        transaction_id="txn-1",
+        correlation_id="corr-1",
+        sender_agent_id="supplier-agent-1",
+        recipient_agent_id="buyer-agent-1",
+        organization_id="org-supplier",
+        proposal_id="proposal-3",
+        version=4,
+        agreement_of_proposal_id="proposal-2",
+        lines=[
+            {
+                "product_ref": "milk-lactose-free-1l",
+                "quantity": "100",
+                "unit": "L",
+                "unit_price": "1.20",
+            }
+        ],
+        currency="EUR",
+        delivery_terms=None,
+    )
+    jsonschema.validate(artifact, _published_schema("proposed_agreement.schema.json"))
 
 
 def test_published_authorization_evidence_schema_matches_real_wire_artifact():
@@ -176,6 +208,7 @@ def test_published_order_confirmation_schema_matches_real_wire_artifact():
         "request_for_quote.schema.json",
         "quote.schema.json",
         "accept_proposal.schema.json",
+        "proposed_agreement.schema.json",
         "authorization_evidence.schema.json",
         "order_commit_request.schema.json",
         "order_confirmation.schema.json",

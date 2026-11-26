@@ -98,6 +98,9 @@ function verifyCompact(
   if (typeof claims.exp === "number" && now >= claims.exp) {
     throw new JwsVerificationError("Proof has expired.");
   }
+  if (typeof claims.nbf === "number" && now < claims.nbf) {
+    throw new JwsVerificationError("Proof is not yet valid (nbf is in the future).");
+  }
   return { header, claims };
 }
 

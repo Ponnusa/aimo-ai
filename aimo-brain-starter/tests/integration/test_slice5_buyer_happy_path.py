@@ -121,7 +121,34 @@ def _build_supplier_app(
     monkeypatch.setenv("NETWORK_INTERNAL_SERVICE_KEY", INTERNAL_KEY)
     monkeypatch.setenv("SERVICE_CREDENTIAL_SIGNING_SECRET", SIGNING_SECRET)
     supplier_settings_module.get_settings.cache_clear()
-    return supplier_app_module.create_app(), SupplierTaskRecord
+    app = supplier_app_module.create_app()
+
+    # Harness-only augmentation of the already-built app INSTANCE --
+    # apps/supplier-agent's own source is untouched. registry-api's
+    # endpoint-control verification (ADR-015/016) fetches this
+    # well-known path from whatever a2a_card_url an agent registers
+    # with; in a real deployment that would be served by the agent
+    # operator's own infrastructure (a reverse proxy, sidecar, etc.),
+    # which this harness stands in for here so the real supplier-agent
+    # can legitimately reach registry-api's "active" status and be
+    # discoverable, without inventing a second, parallel identity.
+    challenge_state: dict[str, str | None] = {"value": None}
+
+    @app.get("/.well-known/aimo-brain-challenge")
+    async def _serve_supplier_challenge():
+        from fastapi import Response
+
+        return Response(content=challenge_state["value"] or "", media_type="text/plain")
+
+    # The A2A SDK mounts its JSON-RPC handler as a catch-all Starlette
+    # Mount("/") -- which, appended earlier, would otherwise shadow any
+    # route added afterward at the same host. Moving this one route to
+    # the front of the route list (an ordinary Starlette routing
+    # mechanism, not a change to apps/supplier-agent's own source) lets
+    # Starlette try it before falling through to that catch-all mount.
+    app.router.routes.insert(0, app.router.routes.pop())
+
+    return app, SupplierTaskRecord, challenge_state
 
 
 async def _create_full_schema(database_url: str) -> None:
@@ -198,7 +225,7 @@ async def full_stack(monkeypatch):
                 supplier_db = _fresh_sqlite_url("supplier")
                 supplier_a2a_port = find_free_port()
                 supplier_a2a_url = f"http://127.0.0.1:{supplier_a2a_port}"
-                supplier_app, SupplierTaskRecord = _build_supplier_app(
+                supplier_app, SupplierTaskRecord, challenge_state = _build_supplier_app(
                     a2a_url=supplier_a2a_url,
                     database_url=supplier_db,
                     supplier_mcp_url=f"http://127.0.0.1:{mcp_port}/mcp",
@@ -210,12 +237,59 @@ async def full_stack(monkeypatch):
                 )
                 await _create_full_schema(supplier_db)
                 with running_server(supplier_app, port=supplier_a2a_port) as supplier_server:
+                    await _register_supplier_with_registry(
+                        registry_base_url=registry_server.base_url,
+                        a2a_card_url=supplier_server.base_url,
+                        challenge_state=challenge_state,
+                    )
                     yield {
                         "network": network_server,
                         "registry": registry_server,
                         "supplier": supplier_server,
                         "supplier_db": supplier_db,
                     }
+
+
+async def _register_supplier_with_registry(
+    *, registry_base_url: str, a2a_card_url: str, challenge_state: dict
+) -> None:
+    """So the TypeScript buyer can discover the supplier through
+    registry-api's real `/agents` endpoint (ADR-020 fix: discovery must
+    be registry-mediated, never a hardcoded URL) -- the supplier agent
+    itself is registered and verified exactly like any other agent,
+    using a legacy-mode manage_agents service credential (the supplier's
+    organization is legacy_global_key in this harness)."""
+    manage_agents_credential = issue_service_credential(
+        organization_id=SUPPLIER_ORG, scope="manage_agents", signing_secret=SIGNING_SECRET
+    )
+    headers = {"Authorization": f"Bearer {manage_agents_credential}"}
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        register = await client.post(
+            f"{registry_base_url}/agents",
+            json={
+                "agent_id": SUPPLIER_AGENT_ID,
+                "organization_id": SUPPLIER_ORG,
+                "a2a_card_url": a2a_card_url,
+            },
+            headers=headers,
+        )
+        assert register.status_code == 200, register.text
+
+        start = await client.post(
+            f"{registry_base_url}/agents/{SUPPLIER_AGENT_ID}/verification/start",
+            params={"organization_id": SUPPLIER_ORG},
+            headers=headers,
+        )
+        assert start.status_code == 200, start.text
+        challenge_state["value"] = start.json()["endpoint_challenge"]
+
+        confirm = await client.post(
+            f"{registry_base_url}/agents/{SUPPLIER_AGENT_ID}/verification/confirm",
+            params={"organization_id": SUPPLIER_ORG},
+            headers=headers,
+        )
+        assert confirm.status_code == 200, confirm.text
+        assert confirm.json()["status"] == "active"
 
 
 async def _bootstrap_external_org(network_base_url: str, organization_id: str) -> str:
@@ -312,12 +386,12 @@ async def test_typescript_buyer_completes_full_commit_against_real_supplier(
             "SUPPLIER_ORGANIZATION_ID": SUPPLIER_ORG,
             "ORG_SCOPED_CREDENTIAL": org_credential,
             "BUYER_AGENT_ID": buyer_agent_id,
-            "SUPPLIER_A2A_URL": stack["supplier"].base_url,
             "SUPPLIER_AGENT_ID": SUPPLIER_AGENT_ID,
             "BUYER_SELF_PORT": str(buyer_port),
             "AGENT_PRIVATE_KEY_JWK": json.dumps(provisioning_output["agentPrivateJwk"]),
             "AGENT_PUBLIC_KEY_JWK": json.dumps(provisioning_output["agentPublicJwk"]),
             "DELEGATED_KID": provisioning_output["delegatedKid"],
+            "NETWORK_AUDIENCE": NETWORK_AUDIENCE,
             "REPLAY_ORDER_COMMIT": "true",
         }
     )

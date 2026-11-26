@@ -32,6 +32,15 @@
       "signed": true
     },
     {
+      "type": "proposed_agreement",
+      "identifier": "https://schemas.aimobrain.example/food-wholesale/proposed_agreement/v0.1",
+      "version": "0.1",
+      "schema": "schemas/proposed_agreement.schema.json",
+      "direction": "supplier -> buyer",
+      "signed": true,
+      "note": "The supplier's response to accept_proposal once both parties have converged on identical terms. Explicitly NONBINDING (docs/DECISIONS.md M4/M5) -- never itself authorization or commitment; the authorization_evidence/order_commit_request/order_confirmation exchange that follows is the only path to a binding state."
+    },
+    {
       "type": "authorization_evidence",
       "identifier": "https://schemas.aimobrain.example/food-wholesale/authorization_evidence/v0.1",
       "version": "0.1",
@@ -57,6 +66,6 @@
       "signed": true
     }
   ],
-  "scope_note": "This manifest covers only the happy-path negotiation/commitment subset slice 5's reference agent exchanges (request_for_quote, quote, accept_proposal, authorization_evidence, order_commit_request, order_confirmation). counterproposal, reject_proposal, proposed_agreement, and the product_availability_* types exist in this system's protocol but are out of this manifest's scope for now -- an external integrator relying on them should request they be added rather than infer their shape from this manifest's omission.",
+  "scope_note": "This manifest covers every artifact type slice 5's reference agent actually exchanges, both sent and received: request_for_quote, quote, accept_proposal, proposed_agreement, authorization_evidence, order_commit_request, order_confirmation. counterproposal, reject_proposal, and the product_availability_* types exist in this system's protocol but are never exchanged by this reference agent and are out of this manifest's scope for now -- an external integrator relying on them should request they be added rather than infer their shape from this manifest's omission.",
   "not_covered_by_this_manifest": "The transport, authentication, discovery, and trust-boundary contract (registry-api/network-api routes) is published separately at ../external-integration-openapi.yaml. This manifest is deliberately only the vertical, domain-specific artifact shapes exchanged once two parties are already discovering and verifying each other through that horizontal contract."
 }
