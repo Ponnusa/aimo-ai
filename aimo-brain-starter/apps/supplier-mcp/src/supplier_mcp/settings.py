@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 from agent_runtime import ServiceSettings
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import SettingsConfigDict
 
 
@@ -62,6 +62,50 @@ class SupplierMcpSettings(ServiceSettings):
     sandbox_erp_service_credential: str = Field(
         default="", validation_alias="SANDBOX_ERP_SERVICE_CREDENTIAL"
     )
+
+    # Only read when supplier_business_system_adapter == "valio_aimo".
+    # Every field here defaults empty/False, and adapter_factory.get_adapter
+    # fails closed at construction time (before this service ever starts
+    # serving traffic) unless valio_aimo_integration_authorized is
+    # explicitly true AND both the base URL and credential are set --
+    # see docs/integrations/valio-aimo-adapter-contract.md and CLAUDE.md:
+    # "Never access Valio Aimo production systems... without explicit
+    # authorization and credentials." Authorization alone does not make
+    # the adapter functional: every ValioAimoAdapter method still raises
+    # NotImplementedError until a real integration is built against
+    # Valio Aimo's actual, granted API -- this flag only gates whether a
+    # deployment can even select the adapter at all.
+    valio_aimo_integration_authorized: bool = Field(
+        default=False, validation_alias="VALIO_AIMO_INTEGRATION_AUTHORIZED"
+    )
+    valio_aimo_base_url: str = Field(default="", validation_alias="VALIO_AIMO_BASE_URL")
+    valio_aimo_api_credential: str = Field(default="", validation_alias="VALIO_AIMO_API_CREDENTIAL")
+
+    @model_validator(mode="after")
+    def _sandbox_and_production_config_must_not_collide(self) -> SupplierMcpSettings:
+        """A copy-paste configuration mistake must never let the sandbox
+        adapter's base URL/credential double as the production Valio
+        Aimo ones, or vice versa -- the two are meant to be reachable
+        over entirely separate networks with entirely separate
+        credentials, never interchangeable. Only checked when both
+        sides are actually configured (non-empty); an unset field is
+        never compared."""
+        if self.sandbox_erp_base_url and self.sandbox_erp_base_url == self.valio_aimo_base_url:
+            raise ValueError(
+                "SANDBOX_ERP_BASE_URL and VALIO_AIMO_BASE_URL must never be the same "
+                "value -- the sandbox and a production business system must be "
+                "reachable over separate networks."
+            )
+        if (
+            self.sandbox_erp_service_credential
+            and self.sandbox_erp_service_credential == self.valio_aimo_api_credential
+        ):
+            raise ValueError(
+                "SANDBOX_ERP_SERVICE_CREDENTIAL and VALIO_AIMO_API_CREDENTIAL must never "
+                "be the same value -- a sandbox credential must never also be a valid "
+                "production credential, or vice versa."
+            )
+        return self
 
 
 @lru_cache

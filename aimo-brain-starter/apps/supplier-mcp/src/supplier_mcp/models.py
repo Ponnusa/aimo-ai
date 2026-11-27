@@ -55,3 +55,10 @@ class SupplierMcpOrderRecord(Base):
     external_order_id: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    #: True only for a row ``get_order_status``'s adapter-recovery path
+    #: created (M7 hardening) -- that path never receives agreement_id/
+    #: buyer_organization_id/content_hash, so those three columns are
+    #: explicit empty-string placeholders, not the real transaction
+    #: identity, until a genuine ``execute_order`` retry backfills them.
+    #: Never an ordinary, fully-linked duplicate while this is true.
+    recovered_without_request_context: Mapped[bool] = mapped_column(nullable=False, default=False)

@@ -41,7 +41,7 @@ from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp_integration import require_tool_scope
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -369,7 +369,14 @@ def create_mcp_server(
         underneath) — not merely by checking first, since a concurrent
         duplicate call can race the check, never the constraint.
         ``status`` may be ``"pending"`` (a delayed-ack business system)
-        -- never treated as failure by any caller."""
+        -- never treated as failure by any caller. The *response* is
+        always the same for a repeated key; internally, if the existing
+        row was created by ``get_order_status``'s adapter-recovery path
+        (``recovered_without_request_context``) rather than by a prior
+        call here, this retry's own agreement_id/buyer_organization_id/
+        content_hash safely backfill that row's previously-unknown
+        transaction identity, first-write-wins against any concurrent
+        retry doing the same."""
         organization_id = await _authorize(
             ctx, tool_name="execute_order", required_scope=EXECUTE_ORDER_SCOPE
         )
@@ -382,11 +389,50 @@ def create_mcp_server(
                 )
             ).scalar_one_or_none()
             if existing is not None:
+                backfilled = False
+                if existing.recovered_without_request_context:
+                    # This row's agreement_id/buyer_organization_id/
+                    # content_hash were never known -- get_order_status's
+                    # adapter-recovery path created it with no request to
+                    # take them from (see that tool below). This retry is
+                    # exactly the "authenticated retry whose transaction
+                    # identity and business content" the recovery left
+                    # pending: it arrived through this same authenticated,
+                    # idempotency_key-matched path, so backfilling from it
+                    # is safe. Guarded by recovered_without_request_context
+                    # in the WHERE clause (not just idempotency_key) so a
+                    # second, differently-worded retry racing against this
+                    # one can never overwrite whichever backfill commits
+                    # first -- first write wins, exactly like every other
+                    # idempotency guarantee in this table.
+                    backfill_result = await session.execute(
+                        update(SupplierMcpOrderRecord)
+                        .where(
+                            SupplierMcpOrderRecord.idempotency_key == idempotency_key,
+                            SupplierMcpOrderRecord.recovered_without_request_context.is_(True),
+                        )
+                        .values(
+                            agreement_id=agreement_id,
+                            buyer_organization_id=buyer_organization_id,
+                            content_hash=content_hash,
+                            recovered_without_request_context=False,
+                        )
+                    )
+                    await session.commit()
+                    backfilled = backfill_result.rowcount > 0
+                    # Core UPDATE above bypasses the ORM identity map --
+                    # `existing` must be refreshed from the database
+                    # rather than trusted as-is, regardless of whether
+                    # THIS call's backfill won or a concurrent one did.
+                    await session.refresh(existing)
                 await _audit(
                     tool_name="execute_order",
                     organization_id=organization_id,
                     success=True,
-                    detail=f"idempotency_key={idempotency_key!r} duplicate=True",
+                    detail=(
+                        f"idempotency_key={idempotency_key!r} duplicate=True"
+                        + (" (backfilled transaction identity)" if backfilled else "")
+                    ),
                 )
                 return OrderExecutionOut(
                     idempotency_key=idempotency_key,
@@ -483,7 +529,19 @@ def create_mcp_server(
         reconciles a locally-pending row against the configured adapter
         before answering, so a resolved delayed-ack order is reflected
         here without a separate sync step): the same narrow
-        ``execute_order`` scope as the execution tool itself."""
+        ``execute_order`` scope as the execution tool itself.
+
+        Also covers the case ``execute_order`` itself cannot: a
+        submission that got no response at all (the adapter's own HTTP
+        client timed out) writes no local row here, by design, because
+        it never learned an ``external_order_id`` to record. If the
+        business system actually accepted that order a little later --
+        a real risk whenever a timeout does not imply failure -- this
+        local table would otherwise never discover it, leaving the
+        order permanently stuck in ``RECONCILIATION_REQUIRED`` even
+        though it genuinely completed. So when no local row exists at
+        all, this also asks the adapter directly, exactly as it already
+        does for a locally-``pending`` row, and persists what it finds."""
         organization_id = await _authorize(
             ctx, tool_name="get_order_status", required_scope=EXECUTE_ORDER_SCOPE
         )
@@ -505,6 +563,48 @@ def create_mcp_server(
                     if remote.external_order_id:
                         record.external_order_id = remote.external_order_id
                     await session.commit()
+            elif record is None:
+                try:
+                    remote = await adapter.get_order_status(idempotency_key=idempotency_key)
+                except AdapterError:
+                    remote = None
+                if remote is not None and remote.found and remote.status != "pending":
+                    # agreement_id/buyer_organization_id/content_hash are
+                    # never known here -- this call only ever carries an
+                    # idempotency_key -- so they're left as empty-string
+                    # placeholders, explicitly marked via
+                    # recovered_without_request_context rather than left
+                    # indistinguishable from an ordinary, fully-linked
+                    # order. execute_order's own existing-row branch
+                    # checks this flag and safely backfills the real
+                    # values from the first genuine retry it sees for
+                    # this key, first-write-wins.
+                    record = SupplierMcpOrderRecord(
+                        idempotency_key=idempotency_key,
+                        agreement_id="",
+                        buyer_organization_id="",
+                        content_hash="",
+                        external_order_id=remote.external_order_id,
+                        status="confirmed" if remote.status == "confirmed" else remote.status,
+                        created_at=datetime.now(UTC).replace(tzinfo=None),
+                        recovered_without_request_context=True,
+                    )
+                    session.add(record)
+                    try:
+                        await session.commit()
+                    except IntegrityError:
+                        # Lost a race against a concurrent recovery (or
+                        # a genuine execute_order retry that succeeded
+                        # meanwhile) for the same key -- that row is now
+                        # the durable record; use it instead.
+                        await session.rollback()
+                        record = (
+                            await session.execute(
+                                select(SupplierMcpOrderRecord).where(
+                                    SupplierMcpOrderRecord.idempotency_key == idempotency_key
+                                )
+                            )
+                        ).scalar_one()
         await _audit(
             tool_name="get_order_status",
             organization_id=organization_id,

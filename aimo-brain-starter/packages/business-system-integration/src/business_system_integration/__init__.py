@@ -11,6 +11,7 @@ from __future__ import annotations
 from business_system_integration.adapter import SupplierBusinessSystemAdapter
 from business_system_integration.errors import (
     AdapterAuthenticationError,
+    AdapterAuthorizationMissingError,
     AdapterError,
     AdapterInvalidRequestError,
     AdapterMalformedResponseError,
@@ -29,6 +30,7 @@ from business_system_integration.types import (
 
 __all__ = [
     "AdapterAuthenticationError",
+    "AdapterAuthorizationMissingError",
     "AdapterError",
     "AdapterInvalidRequestError",
     "AdapterMalformedResponseError",

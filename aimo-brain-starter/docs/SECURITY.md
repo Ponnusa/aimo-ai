@@ -554,3 +554,93 @@ deploying the delegated key/kid as `SUPPLIER_SIGNING_PRIVATE_KEY_PEM`/
 `SUPPLIER_SIGNING_KID`, and removing the root key from that
 environment entirely rather than leaving it alongside — a separate,
 explicitly authorized change.
+
+## Authorised production ERP integration and execution boundary (blocked; feasible subset done)
+
+The other material limitation flagged after the staging synthetic-trade
+exercise: `SUPPLIER_BUSINESS_SYSTEM_ADAPTER` selection was configuration-
+only, and no production adapter exists at all. **The production adapter
+itself remains genuinely blocked** — `food_wholesale.adapters.valio_aimo`
+(or whichever business system is eventually authorized) cannot be
+implemented without that owner's actual API access, credentials, and an
+agreed idempotency/reconciliation contract; per `CLAUDE.md`, this is
+never guessed at. No live transaction, pilot, or ERP-owner contact was
+authorized or attempted here.
+
+What **was** fixed, entirely in sandbox, because it does not depend on
+ERP-owner cooperation:
+
+- **Fail-closed adapter selection.** `adapter_factory.get_adapter`
+  previously constructed `ValioAimoAdapter()` unconditionally whenever
+  `SUPPLIER_BUSINESS_SYSTEM_ADAPTER=valio_aimo` was set — the server
+  came up looking healthy, only failing on the first real call. It now
+  raises `AdapterAuthorizationMissingError` at construction time (before
+  any traffic is served) unless `VALIO_AIMO_INTEGRATION_AUTHORIZED=true`
+  *and* a base URL and credential are both configured — a deliberate
+  two-key control: authorization alone doesn't make the adapter
+  functional (every method still raises `NotImplementedError` pending a
+  real implementation), but a deployment can no longer select a
+  production business system by accident.
+- **Configuration collision checks — explicitly not network isolation.**
+  `SupplierMcpSettings` now rejects, at settings-construction time, a
+  sandbox and a production (`valio_aimo`) base URL or credential that
+  are configured identically — a pure in-process string-equality check
+  on two already-loaded config values, nothing more. **This provides no
+  actual network-level isolation, no egress control, and no credential-
+  scope enforcement by any receiving system.** It catches one specific
+  copy-paste mistake (the sandbox adapter's value and the production
+  adapter's value being made byte-identical) and nothing else — it does
+  not stop the sandbox adapter from being pointed at a genuine
+  production host that simply has a *different* string value, and the
+  check is skipped entirely whenever either side is left unconfigured
+  (e.g. `VALIO_AIMO_BASE_URL` unset). Genuine network/credential
+  isolation would require separate network segments or egress
+  allowlists so the sandbox adapter's process is infrastructurally
+  incapable of reaching a production host regardless of configuration,
+  and credential scopes enforced by the receiving system itself — none
+  of that exists here. This gap in the original wording of this section
+  was raised directly by an independent review and corrected rather than
+  left implied.
+- **A genuine reconciliation bug found and fixed while building the
+  duplicate/timeout/recovery test coverage below:** `get_order_status`
+  only re-checked the configured adapter when a *locally-pending* row
+  already existed. When `execute_order`'s own adapter call timed out —
+  a real, reproduced race: the sandbox adapter's HTTP client times out
+  at a fixed 3s while the ERP backend keeps processing and eventually
+  commits the order anyway — supplier-mcp wrote no local row at all (it
+  never learned an `external_order_id`), so `get_order_status` returned
+  `found=False` immediately, without ever asking the adapter. That order
+  would have stayed in `RECONCILIATION_REQUIRED` forever, even though it
+  genuinely completed. Fixed: `get_order_status` now also asks the
+  adapter directly when no local row exists, and persists what it finds
+  — but the resulting row's `agreement_id`/`buyer_organization_id`/
+  `content_hash` are unknown at that point (this call only ever carries
+  an idempotency_key), so it is marked `recovered_without_request_context`
+  rather than left indistinguishable from an ordinary, fully-linked
+  order. `execute_order`'s own existing-row branch backfills those three
+  fields from the first genuine retry it sees for that key (an
+  authenticated call, matched by the same idempotency_key, carrying the
+  real business content) and clears the flag — guarded so a second,
+  differently-worded retry racing against the first can never overwrite
+  whichever backfill commits first, and never triggers a second
+  submission to the business system either way. See
+  `apps/supplier-mcp/src/supplier_mcp/server.py` and `models.py`.
+- **New test coverage** (`apps/supplier-mcp/tests/test_sandbox_adapter.py`,
+  `apps/supplier-mcp/tests/test_adapter_factory_authorization.py`), all
+  against the real sandbox ERP over real HTTP, never mocked:
+  duplicate submission (two `execute_order` calls, same key, same
+  result, independently confirmed as exactly one order in sandbox-erp's
+  own record); timeout-after-possible-acceptance and recovery (the race
+  above, reconciled, then independently confirmed against sandbox-erp);
+  a valid backfill after recovery; a conflicting retry (two different
+  business contents for the same recovered key — first write wins, the
+  loser never overwrites it, and sandbox-erp confirms no second order
+  either way); the adapter-selection fail-closed gate (unauthorized,
+  authorized-but-unconfigured, and successfully-gated cases); and the
+  sandbox/production configuration-collision guard.
+
+**Explicitly not done, and not claimed:** no production adapter exists;
+no ERP owner has been contacted or has authorized anything; no pilot,
+monitoring plan, reconciliation ownership, or rollback procedure exists
+because there is nothing live to roll back. These all remain blocked on
+the ERP-owner dependency this issue itself named.

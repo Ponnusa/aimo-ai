@@ -43,3 +43,19 @@ class AdapterMalformedResponseError(AdapterError):
     expected normalized shape. Never partially trusted — the caller
     must treat this exactly like an unavailable system, not guess at
     the missing fields."""
+
+
+class AdapterAuthorizationMissingError(AdapterError):
+    """A production adapter was selected by configuration, but the
+    separate, explicit record of the business system owner's own
+    authorization to use it is absent (or the adapter's own
+    credentials are, which the authorization record should never exist
+    without).
+
+    Raised at adapter construction time — before any server starts
+    serving traffic, never from inside a request handler — so a
+    deployment can never silently come up "healthy" configured against
+    a production business system nobody has actually agreed to let it
+    reach. Distinct from :class:`AdapterAuthenticationError`, which the
+    business system itself raises after an adapter calls it; this is
+    never reached because the call is never attempted."""
