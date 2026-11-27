@@ -413,7 +413,22 @@ async def _create_relationship(network_server) -> None:
     assert response.status_code == 200, response.text
 
 
-async def _register_and_verify_supplier(*, registry_server, supplier_server, token: str) -> None:
+async def _mint_management_credential(network_server, organization_id: str) -> str:
+    """A ``manage_organization``-scoped credential — the only credential
+    the agent's own ``PUT /internal/ownership-challenge`` accepts."""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{network_server.base_url}/organizations/{organization_id}/service-credentials",
+            json={"scope": "manage_organization", "ttl_seconds": 60},
+            headers={"X-Admin-Key": ADMIN_KEY},
+        )
+    assert response.status_code == 200, response.text
+    return response.json()["token"]
+
+
+async def _register_and_verify_supplier(
+    *, registry_server, supplier_server, network_server, token: str
+) -> None:
     async with httpx.AsyncClient() as client:
         register = await client.post(
             f"{registry_server.base_url}/agents",
@@ -433,9 +448,11 @@ async def _register_and_verify_supplier(*, registry_server, supplier_server, tok
         )
         challenge = start.json()["endpoint_challenge"]
 
+        mgmt_token = await _mint_management_credential(network_server, SUPPLIER_ORG)
         await client.put(
             f"{supplier_server.base_url}/internal/ownership-challenge",
             json={"challenge": challenge},
+            headers={"Authorization": f"Bearer {mgmt_token}"},
         )
 
         confirm = await client.post(
@@ -447,7 +464,9 @@ async def _register_and_verify_supplier(*, registry_server, supplier_server, tok
         assert confirm.json()["status"] == "active"
 
 
-async def _register_and_verify_buyer(*, registry_server, buyer_server, token: str) -> None:
+async def _register_and_verify_buyer(
+    *, registry_server, buyer_server, network_server, token: str
+) -> None:
     """As of M5.1, the buyer must also be a registered, active agent —
     not just the discovered supplier — since the supplier's
     ``verify_agent_is_registered_and_related`` check now applies to
@@ -471,9 +490,11 @@ async def _register_and_verify_buyer(*, registry_server, buyer_server, token: st
         )
         challenge = start.json()["endpoint_challenge"]
 
+        mgmt_token = await _mint_management_credential(network_server, BUYER_ORG)
         await client.put(
             f"{buyer_server.base_url}/internal/ownership-challenge",
             json={"challenge": challenge},
+            headers={"Authorization": f"Bearer {mgmt_token}"},
         )
 
         confirm = await client.post(
@@ -493,11 +514,17 @@ async def test_full_authorization_and_commitment_flow(
     token = await _mint_credential(network_server, SUPPLIER_ORG)
     await _create_relationship(network_server)
     await _register_and_verify_supplier(
-        registry_server=registry_server, supplier_server=supplier_server, token=token
+        registry_server=registry_server,
+        supplier_server=supplier_server,
+        network_server=network_server,
+        token=token,
     )
     buyer_token = await _mint_credential(network_server, BUYER_ORG)
     await _register_and_verify_buyer(
-        registry_server=registry_server, buyer_server=buyer_server, token=buyer_token
+        registry_server=registry_server,
+        buyer_server=buyer_server,
+        network_server=network_server,
+        token=buyer_token,
     )
 
     from buyer_agent.client import negotiate_purchase_via_registry

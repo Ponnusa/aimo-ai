@@ -439,3 +439,36 @@ production access exists anywhere in this codebase, per `CLAUDE.md`.
     operator can register an agent without a signing key (unchanged
     M0-M7 behavior); an organization explicitly classified "external"
     cannot register an agent without one, and cannot classify itself.
+
+## Found during a staging end-to-end exercise: unauthenticated challenge write
+
+`buyer-agent`/`supplier-agent`'s own `PUT /internal/ownership-challenge` —
+the operator-facing endpoint that tells this process what value to serve
+at `/.well-known/aimo-brain-challenge` for registry-api's endpoint-
+ownership fetch (M2) — had no authentication at all. The `GET` side is
+correctly, deliberately public (registry-api, an unauthenticated third
+party from this service's point of view, must be able to fetch it); the
+gap was specifically that the **write** side was equally open, so any
+unauthenticated caller on the internet could overwrite or clear what gets
+served there at any time, including mid-verification. This did not let an
+attacker forge a *valid* challenge response — registry-api's own
+nonce+signature-bound challenge format (test case 32 above) still
+protects that — but it is a real unauthenticated-write/availability gap
+on this one step, found live rather than by inspection. Fixed by requiring
+the same `manage_organization`-scoped credential the rest of each
+service's management API already uses; see
+`test_ownership_challenge_auth.py` in each app's test suite for the
+authorization matrix (no credential, wrong organization's credential,
+wrong scope, correct credential — and that the `GET` side remains
+unauthenticated throughout).
+
+Residual, explicitly not fixed as part of this: the stored challenge
+value has no TTL of its own and is never cleared after a successful
+verification — it is served indefinitely until the next `PUT` or process
+restart. This is a minor information-exposure concern (it discloses a
+past, no-longer-useful nonce and timestamp to anyone who asks), not a
+security boundary — registry-api enforces its own challenge expiry
+independently and never accepts a stale one. Left undone rather than
+risking a retry bug under time pressure (a legitimate operator may need
+to re-confirm after an unrelated failure, which needs the same value
+served again).

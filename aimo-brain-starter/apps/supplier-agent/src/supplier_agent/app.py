@@ -19,15 +19,16 @@ from a2a.server.routes import (
 )
 from a2a.server.tasks import DatabaseTaskStore
 from agent_runtime import get_llm_adapter
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from database import new_engine
+from identity import ServiceCredentialError, verify_service_credential
 from supplier_agent.a2a_card import build_agent_card
 from supplier_agent.a2a_executor import SupplierAgentExecutor
-from supplier_agent.management_api import create_management_router
+from supplier_agent.management_api import MANAGE_ORGANIZATION_SCOPE, create_management_router
 from supplier_agent.settings import get_settings
 
 
@@ -103,10 +104,42 @@ def create_app() -> FastAPI:
     # will mark the agent "active". This is NOT agent-to-agent
     # communication — it is the agent's own operator configuring their own
     # server, the same way domain-validated TLS certificates work.
+    #
+    # The GET below is deliberately public with no credential — that is
+    # the whole point (registry-api, an unauthenticated third party from
+    # this service's point of view, must be able to fetch it). The PUT is
+    # a different concern entirely: it is the WRITE side, and was found
+    # (2026-11-27 staging exercise) to have no authentication at all,
+    # meaning any unauthenticated caller on the internet could overwrite
+    # or clear what gets served here mid-verification — a real
+    # unauthenticated-write/DoS gap on this one step, not a weakness in
+    # the challenge itself (registry-api's own nonce+signature format
+    # still protects against a forged challenge value being *accepted*;
+    # this gap was about who may *set* the value this agent serves).
     app.state.ownership_challenge = None
 
+    def _require_organization_management(authorization: str | None) -> None:
+        if authorization is None or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Missing bearer service credential.")
+        try:
+            claims = verify_service_credential(
+                authorization.removeprefix("Bearer "),
+                signing_secret=settings.service_credential_signing_secret,
+                required_scope=MANAGE_ORGANIZATION_SCOPE,
+            )
+        except ServiceCredentialError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        if claims.organization_id != settings.supplier_organization_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Credential does not grant management of this organization.",
+            )
+
     @app.put("/internal/ownership-challenge")
-    async def set_ownership_challenge(body: dict[str, str]) -> dict[str, str]:
+    async def set_ownership_challenge(
+        body: dict[str, str], authorization: str | None = Header(default=None)
+    ) -> dict[str, str]:
+        _require_organization_management(authorization)
         app.state.ownership_challenge = body["challenge"]
         return {"status": "ok"}
 
