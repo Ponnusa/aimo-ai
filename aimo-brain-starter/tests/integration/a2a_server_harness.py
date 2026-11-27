@@ -22,7 +22,13 @@ from dataclasses import dataclass
 import httpx
 import uvicorn
 from fastapi import FastAPI
-from message_integrity import generate_signing_keypair, private_key_to_pem, public_key_to_jwk
+from message_integrity import (
+    DelegationScope,
+    build_delegation,
+    generate_signing_keypair,
+    private_key_to_pem,
+    public_key_to_jwk,
+)
 
 
 @dataclass
@@ -98,3 +104,104 @@ async def generate_and_register_signing_key(
         )
     response.raise_for_status()
     return private_key_to_pem(private_key)
+
+
+@dataclass
+class DelegatedSigningKey:
+    """A dedicated per-agent signing key plus the organisation-root-
+    signed delegation that authorizes it (M8 slice 2, ADR-017) — the
+    replacement for an agent holding its organization's root private
+    key directly. The caller sets ``private_key_pem``/``kid`` as the
+    agent's own ``*_SIGNING_PRIVATE_KEY_PEM``/``*_SIGNING_KID`` and
+    never needs ``root_private_key_pem`` again once ``jti`` is
+    published; it is returned only so a test can exercise rotation
+    (issuing a second delegation under the same root) without
+    re-registering a new root key."""
+
+    private_key_pem: str
+    kid: str
+    jti: str
+    root_private_key_pem: str
+    root_kid: str
+
+
+async def generate_and_register_delegated_signing_key(
+    *,
+    network_api_base_url: str,
+    organization_id: str,
+    admin_key: str,
+    agent_id: str,
+    audience: str,
+    artifact_types: tuple[str, ...],
+    protocol_version: str = "v1",
+    root_kid: str | None = None,
+    root_private_key_pem: str | None = None,
+    delegated_kid: str | None = None,
+    validity_seconds: int | None = None,
+) -> DelegatedSigningKey:
+    """End-to-end equivalent of ``scripts/issue_agent_delegation.py``,
+    against a real test server rather than printed to a terminal: makes
+    (or reuses) an organization root key, builds and signs a delegation
+    for a dedicated agent key entirely with that root key material, and
+    publishes the delegation to network-api. The root private key is
+    never set as the agent's own signing key -- only the dedicated
+    delegated key returned here is."""
+    if root_private_key_pem is None:
+        root_kid = root_kid or f"{organization_id}-root-k1"
+        root_private_key_pem = await generate_and_register_signing_key(
+            network_api_base_url=network_api_base_url,
+            organization_id=organization_id,
+            admin_key=admin_key,
+            kid=root_kid,
+        )
+    assert root_kid is not None
+
+    from message_integrity import private_key_from_pem
+
+    root_private_key = private_key_from_pem(root_private_key_pem)
+    delegated_private_key, delegated_public_key = generate_signing_keypair()
+    delegated_kid = delegated_kid or f"{agent_id}-k1"
+    delegated_jwk = public_key_to_jwk(delegated_public_key, kid=delegated_kid)
+
+    build_delegation_kwargs = {}
+    if validity_seconds is not None:
+        build_delegation_kwargs["validity_seconds"] = validity_seconds
+    token = build_delegation(
+        root_private_key=root_private_key,
+        issuing_kid=root_kid,
+        organization_id=organization_id,
+        agent_id=agent_id,
+        audience=audience,
+        delegated_kid=delegated_kid,
+        delegated_public_key_jwk=delegated_jwk,
+        scope=DelegationScope(artifact_types=artifact_types, protocol_version=protocol_version),
+        **build_delegation_kwargs,
+    )
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{network_api_base_url}/organizations/{organization_id}/delegations",
+            json={"jws": token},
+            headers={"X-Admin-Key": admin_key},
+        )
+    response.raise_for_status()
+    jti = response.json()["jti"]
+
+    return DelegatedSigningKey(
+        private_key_pem=private_key_to_pem(delegated_private_key),
+        kid=delegated_kid,
+        jti=jti,
+        root_private_key_pem=root_private_key_pem,
+        root_kid=root_kid,
+    )
+
+
+async def revoke_delegation(
+    *, network_api_base_url: str, organization_id: str, admin_key: str, jti: str
+) -> None:
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{network_api_base_url}/organizations/{organization_id}/delegations/{jti}/revoke",
+            headers={"X-Admin-Key": admin_key},
+        )
+    response.raise_for_status()
