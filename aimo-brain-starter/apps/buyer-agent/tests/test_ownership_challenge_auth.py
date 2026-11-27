@@ -97,6 +97,54 @@ async def test_rejects_setting_the_challenge_with_wrong_scope() -> None:
 
 
 @pytest.mark.asyncio
+async def test_denied_overwrite_leaves_previously_set_challenge_unchanged() -> None:
+    """A real value is set with a valid credential; a subsequent denied PUT
+    (wrong org, wrong scope, and no credential at all) must not alter it --
+    the GET side must keep serving the original value throughout."""
+    app, settings = await _fresh_app()
+    token = issue_service_credential(
+        organization_id=BUYER_ORG,
+        scope="manage_organization",
+        signing_secret=settings.service_credential_signing_secret,
+    )
+    other_org_token = issue_service_credential(
+        organization_id=OTHER_ORG,
+        scope="manage_organization",
+        signing_secret=settings.service_credential_signing_secret,
+    )
+    wrong_scope_token = issue_service_credential(
+        organization_id=BUYER_ORG,
+        scope="manage_agents",
+        signing_secret=settings.service_credential_signing_secret,
+    )
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        set_response = await client.put(
+            "/internal/ownership-challenge",
+            json={"challenge": "the-original-real-value"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert set_response.status_code == 200
+
+        denied_attempts = [
+            {},
+            {"Authorization": f"Bearer {other_org_token}"},
+            {"Authorization": f"Bearer {wrong_scope_token}"},
+        ]
+        for headers in denied_attempts:
+            denied_response = await client.put(
+                "/internal/ownership-challenge",
+                json={"challenge": "attacker-supplied-value"},
+                headers=headers,
+            )
+            assert denied_response.status_code in (401, 403)
+
+            served = await client.get("/.well-known/aimo-brain-challenge")
+            assert served.status_code == 200
+            assert served.text == "the-original-real-value"
+
+
+@pytest.mark.asyncio
 async def test_accepts_setting_the_challenge_with_the_right_credential() -> None:
     app, settings = await _fresh_app()
     token = issue_service_credential(
