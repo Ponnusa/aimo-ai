@@ -576,6 +576,15 @@ async def test_valid_backfill_fills_in_transaction_identity_after_recovery() -> 
                 assert row_after.agreement_id == "txn_backfill_01"
                 assert row_after.content_hash == "sha256:backfilled"
                 assert row_after.buyer_organization_id == "org_fictional_bistro_01"
+
+                # Independent confirmation against sandbox-erp's own
+                # record: backfilling local linkage must never itself
+                # cause (or coincide with) a second ERP order.
+                erp_record = await _get_order_directly_from_erp(
+                    erp_base_url=erp_base_url, erp_token=erp_token, idempotency_key=key
+                )
+                assert erp_record["found"] is True
+                assert erp_record["external_order_id"] == row_after.external_order_id
         finally:
             _reset_to_mock_adapter()
 
