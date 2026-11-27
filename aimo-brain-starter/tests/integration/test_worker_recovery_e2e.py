@@ -72,11 +72,17 @@ async def test_worker_recovers_crashed_commit_without_duplicate_order(
     token = await _mint_credential(network_server, SUPPLIER_ORG)
     await _create_relationship(network_server)
     await _register_and_verify_supplier(
-        registry_server=registry_server, supplier_server=supplier_server, token=token
+        registry_server=registry_server,
+        supplier_server=supplier_server,
+        network_server=network_server,
+        token=token,
     )
     buyer_token = await _mint_credential(network_server, BUYER_ORG)
     await _register_and_verify_buyer(
-        registry_server=registry_server, buyer_server=buyer_server, token=buyer_token
+        registry_server=registry_server,
+        buyer_server=buyer_server,
+        network_server=network_server,
+        token=buyer_token,
     )
 
     settings = get_settings()

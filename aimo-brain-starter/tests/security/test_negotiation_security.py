@@ -304,8 +304,27 @@ async def _mint_credential(network_server, organization_id: str) -> str:
     return response.json()["token"]
 
 
+async def _mint_management_credential(network_server, organization_id: str) -> str:
+    """A ``manage_organization``-scoped credential — the only credential
+    the agent's own ``PUT /internal/ownership-challenge`` accepts."""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{network_server.base_url}/organizations/{organization_id}/service-credentials",
+            json={"scope": "manage_organization", "ttl_seconds": 60},
+            headers={"X-Admin-Key": _ADMIN_KEY},
+        )
+    assert response.status_code == 200, response.text
+    return response.json()["token"]
+
+
 async def _register_and_verify_agent(
-    *, registry_server, agent_server, organization_id: str, agent_id: str, token: str
+    *,
+    registry_server,
+    agent_server,
+    network_server,
+    organization_id: str,
+    agent_id: str,
+    token: str,
 ) -> None:
     async with httpx.AsyncClient() as client:
         register = await client.post(
@@ -326,9 +345,11 @@ async def _register_and_verify_agent(
         )
         challenge = start.json()["endpoint_challenge"]
 
+        mgmt_token = await _mint_management_credential(network_server, organization_id)
         await client.put(
             f"{agent_server.base_url}/internal/ownership-challenge",
             json={"challenge": challenge},
+            headers={"Authorization": f"Bearer {mgmt_token}"},
         )
 
         confirm = await client.post(
@@ -415,6 +436,7 @@ async def security_servers():
                     await _register_and_verify_agent(
                         registry_server=registry_server,
                         agent_server=supplier,
+                        network_server=network_server,
                         organization_id=SUPPLIER_ORG,
                         agent_id=SUPPLIER_AGENT_ID,
                         token=supplier_token,
@@ -423,6 +445,7 @@ async def security_servers():
                     await _register_and_verify_agent(
                         registry_server=registry_server,
                         agent_server=buyer,
+                        network_server=network_server,
                         organization_id=BUYER_ORG,
                         agent_id=BUYER_AGENT_ID,
                         token=buyer_token,

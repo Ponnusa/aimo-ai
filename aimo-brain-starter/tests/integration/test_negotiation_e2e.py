@@ -377,8 +377,27 @@ async def _create_relationship(network_server) -> None:
     assert response.status_code == 200, response.text
 
 
+async def _mint_management_credential(network_server, organization_id: str) -> str:
+    """A ``manage_organization``-scoped credential — the only credential
+    the agent's own ``PUT /internal/ownership-challenge`` accepts."""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{network_server.base_url}/organizations/{organization_id}/service-credentials",
+            json={"scope": "manage_organization", "ttl_seconds": 60},
+            headers={"X-Admin-Key": ADMIN_KEY},
+        )
+    assert response.status_code == 200, response.text
+    return response.json()["token"]
+
+
 async def _register_and_verify_agent(
-    *, registry_server, agent_server, organization_id: str, agent_id: str, token: str
+    *,
+    registry_server,
+    agent_server,
+    network_server,
+    organization_id: str,
+    agent_id: str,
+    token: str,
 ) -> None:
     """Registers and endpoint-ownership-verifies one agent in
     registry-api. As of M5.1, *every* agent sending a signed message
@@ -405,9 +424,11 @@ async def _register_and_verify_agent(
         )
         challenge = start.json()["endpoint_challenge"]
 
+        mgmt_token = await _mint_management_credential(network_server, organization_id)
         await client.put(
             f"{agent_server.base_url}/internal/ownership-challenge",
             json={"challenge": challenge},
+            headers={"Authorization": f"Bearer {mgmt_token}"},
         )
 
         confirm = await client.post(
@@ -419,20 +440,26 @@ async def _register_and_verify_agent(
         assert confirm.json()["status"] == "active"
 
 
-async def _register_and_verify_supplier(*, registry_server, supplier_server, token: str) -> None:
+async def _register_and_verify_supplier(
+    *, registry_server, supplier_server, network_server, token: str
+) -> None:
     await _register_and_verify_agent(
         registry_server=registry_server,
         agent_server=supplier_server,
+        network_server=network_server,
         organization_id=SUPPLIER_ORG,
         agent_id="agent_fictional_supplier_01",
         token=token,
     )
 
 
-async def _register_and_verify_buyer(*, registry_server, buyer_server, token: str) -> None:
+async def _register_and_verify_buyer(
+    *, registry_server, buyer_server, network_server, token: str
+) -> None:
     await _register_and_verify_agent(
         registry_server=registry_server,
         agent_server=buyer_server,
+        network_server=network_server,
         organization_id=BUYER_ORG,
         agent_id="agent_fictional_buyer_01",
         token=token,
@@ -447,11 +474,17 @@ async def test_negotiation_converges_on_nonbinding_proposed_agreement(
     token = await _mint_credential(network_server, SUPPLIER_ORG)
     await _create_relationship(network_server)
     await _register_and_verify_supplier(
-        registry_server=registry_server, supplier_server=supplier_server, token=token
+        registry_server=registry_server,
+        supplier_server=supplier_server,
+        network_server=network_server,
+        token=token,
     )
     buyer_token = await _mint_credential(network_server, BUYER_ORG)
     await _register_and_verify_buyer(
-        registry_server=registry_server, buyer_server=buyer_server, token=buyer_token
+        registry_server=registry_server,
+        buyer_server=buyer_server,
+        network_server=network_server,
+        token=buyer_token,
     )
 
     from buyer_agent.client import negotiate_purchase_via_registry
@@ -527,11 +560,17 @@ async def test_negotiation_exercises_a_real_counteroffer_round(
     token = await _mint_credential(network_server, SUPPLIER_ORG)
     await _create_relationship(network_server)
     await _register_and_verify_supplier(
-        registry_server=registry_server, supplier_server=supplier_server, token=token
+        registry_server=registry_server,
+        supplier_server=supplier_server,
+        network_server=network_server,
+        token=token,
     )
     buyer_token = await _mint_credential(network_server, BUYER_ORG)
     await _register_and_verify_buyer(
-        registry_server=registry_server, buyer_server=buyer_server, token=buyer_token
+        registry_server=registry_server,
+        buyer_server=buyer_server,
+        network_server=network_server,
+        token=buyer_token,
     )
 
     from buyer_agent.client import negotiate_purchase_via_registry
@@ -579,11 +618,17 @@ async def test_negotiation_recoverable_after_buyer_restart(
     token = await _mint_credential(network_server, SUPPLIER_ORG)
     await _create_relationship(network_server)
     await _register_and_verify_supplier(
-        registry_server=registry_server, supplier_server=supplier_server, token=token
+        registry_server=registry_server,
+        supplier_server=supplier_server,
+        network_server=network_server,
+        token=token,
     )
     buyer_token = await _mint_credential(network_server, BUYER_ORG)
     await _register_and_verify_buyer(
-        registry_server=registry_server, buyer_server=buyer_server, token=buyer_token
+        registry_server=registry_server,
+        buyer_server=buyer_server,
+        network_server=network_server,
+        token=buyer_token,
     )
 
     from buyer_agent.client import negotiate_purchase_via_registry

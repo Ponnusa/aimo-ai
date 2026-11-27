@@ -267,6 +267,19 @@ async def _mint_credential(network_server, organization_id: str) -> str:
     return response.json()["token"]
 
 
+async def _mint_management_credential(network_server, organization_id: str) -> str:
+    """A ``manage_organization``-scoped credential — the only credential
+    the agent's own ``PUT /internal/ownership-challenge`` accepts."""
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{network_server.base_url}/organizations/{organization_id}/service-credentials",
+            json={"scope": "manage_organization", "ttl_seconds": 60},
+            headers={"X-Admin-Key": ADMIN_KEY},
+        )
+    assert response.status_code == 200, response.text
+    return response.json()["token"]
+
+
 async def _create_relationship(network_server) -> None:
     async with httpx.AsyncClient() as client:
         response = await client.post(
@@ -280,7 +293,9 @@ async def _create_relationship(network_server) -> None:
     assert response.status_code == 200, response.text
 
 
-async def _register_and_verify_supplier(*, registry_server, supplier_server, token: str) -> None:
+async def _register_and_verify_supplier(
+    *, registry_server, supplier_server, network_server, token: str
+) -> None:
     async with httpx.AsyncClient() as client:
         register = await client.post(
             f"{registry_server.base_url}/agents",
@@ -302,9 +317,11 @@ async def _register_and_verify_supplier(*, registry_server, supplier_server, tok
         assert start.status_code == 200, start.text
         challenge = start.json()["endpoint_challenge"]
 
+        mgmt_token = await _mint_management_credential(network_server, SUPPLIER_ORG)
         put_response = await client.put(
             f"{supplier_server.base_url}/internal/ownership-challenge",
             json={"challenge": challenge},
+            headers={"Authorization": f"Bearer {mgmt_token}"},
         )
         assert put_response.status_code == 200
 
@@ -325,7 +342,10 @@ async def test_registry_discovery_then_direct_a2a_exchange(
     token = await _mint_credential(network_server, SUPPLIER_ORG)
     await _create_relationship(network_server)
     await _register_and_verify_supplier(
-        registry_server=registry_server, supplier_server=supplier_server, token=token
+        registry_server=registry_server,
+        supplier_server=supplier_server,
+        network_server=network_server,
+        token=token,
     )
 
     from buyer_agent.client import request_product_availability_via_registry
@@ -357,7 +377,10 @@ async def test_discovery_without_relationship_is_not_found(
     not fall back to treating the agent as public."""
     token = await _mint_credential(network_server, SUPPLIER_ORG)
     await _register_and_verify_supplier(
-        registry_server=registry_server, supplier_server=supplier_server, token=token
+        registry_server=registry_server,
+        supplier_server=supplier_server,
+        network_server=network_server,
+        token=token,
     )
 
     async with httpx.AsyncClient() as client:
@@ -376,7 +399,10 @@ async def test_suspended_relationship_removes_discoverability(
     token = await _mint_credential(network_server, SUPPLIER_ORG)
     await _create_relationship(network_server)
     await _register_and_verify_supplier(
-        registry_server=registry_server, supplier_server=supplier_server, token=token
+        registry_server=registry_server,
+        supplier_server=supplier_server,
+        network_server=network_server,
+        token=token,
     )
 
     async with httpx.AsyncClient() as client:
@@ -416,7 +442,10 @@ async def test_revoked_agent_is_not_discoverable(
     token = await _mint_credential(network_server, SUPPLIER_ORG)
     await _create_relationship(network_server)
     await _register_and_verify_supplier(
-        registry_server=registry_server, supplier_server=supplier_server, token=token
+        registry_server=registry_server,
+        supplier_server=supplier_server,
+        network_server=network_server,
+        token=token,
     )
 
     async with httpx.AsyncClient() as client:

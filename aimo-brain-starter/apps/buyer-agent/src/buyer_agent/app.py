@@ -20,16 +20,17 @@ from a2a.server.routes import (
 )
 from a2a.server.tasks import DatabaseTaskStore
 from agent_runtime import get_llm_adapter
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from buyer_agent.a2a_card import build_agent_card
 from buyer_agent.a2a_executor import BuyerAgentExecutor
-from buyer_agent.management_api import create_management_router
+from buyer_agent.management_api import MANAGE_ORGANIZATION_SCOPE, create_management_router
 from buyer_agent.settings import get_settings
 from database import new_engine
+from identity import ServiceCredentialError, verify_service_credential
 
 
 class HealthOut(BaseModel):
@@ -94,11 +95,33 @@ def create_app() -> FastAPI:
     app.include_router(create_management_router(settings=settings, session_factory=session_factory))
 
     # --- Registry endpoint-ownership verification (M2) -----------------
-    # See the matching comment in supplier_agent.app.create_app.
+    # See the matching comment in supplier_agent.app.create_app, including
+    # why the PUT below requires a credential while the GET deliberately
+    # does not.
     app.state.ownership_challenge = None
 
+    def _require_organization_management(authorization: str | None) -> None:
+        if authorization is None or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Missing bearer service credential.")
+        try:
+            claims = verify_service_credential(
+                authorization.removeprefix("Bearer "),
+                signing_secret=settings.service_credential_signing_secret,
+                required_scope=MANAGE_ORGANIZATION_SCOPE,
+            )
+        except ServiceCredentialError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        if claims.organization_id != settings.buyer_organization_id:
+            raise HTTPException(
+                status_code=403,
+                detail="Credential does not grant management of this organization.",
+            )
+
     @app.put("/internal/ownership-challenge")
-    async def set_ownership_challenge(body: dict[str, str]) -> dict[str, str]:
+    async def set_ownership_challenge(
+        body: dict[str, str], authorization: str | None = Header(default=None)
+    ) -> dict[str, str]:
+        _require_organization_management(authorization)
         app.state.ownership_challenge = body["challenge"]
         return {"status": "ok"}
 

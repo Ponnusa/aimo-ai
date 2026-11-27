@@ -167,3 +167,64 @@ credential has ever been configured in this environment, not because of a
 technical safeguard. This switch procedure, and any authorization to perform
 it, covers the sandbox ERP only and never extends to a real production
 system or a real customer order.
+
+## Deployment preflight: `supplier-agent`'s MCP execution credential
+
+Found the hard way during a staging end-to-end trade: `supplier-agent`'s
+`SUPPLIER_MCP_EXECUTION_CREDENTIAL` defaults to an empty string
+(`apps/supplier-agent/src/supplier_agent/settings.py`). An empty credential
+is correctly rejected by supplier-mcp, and `commitment.py`'s own fail-safe
+design correctly treats that rejection as `RECONCILIATION_REQUIRED` rather
+than a loud failure — right behavior for a genuinely unreachable business
+system, wrong behavior for a service that was simply never given its
+credential. The two look identical from the buyer's side and from ordinary
+health checks; only the deploy operator can tell them apart, and only by
+checking the configuration directly.
+
+**Before shifting traffic to a new `supplier-agent` deploy**, run:
+
+```
+cd apps/supplier-agent
+python scripts/preflight_check.py
+```
+
+It exits non-zero with a clear message on stderr if
+`SUPPLIER_MCP_EXECUTION_CREDENTIAL` is empty, and never prints the
+credential's value either way. This is a deliberate release-step check, in
+the same spirit as the migration procedure above — not something
+`create_app()` itself enforces, since tests legitimately build an app
+without this credential set for paths that never reach `execute_order`.
+
+Wiring this into Railway's `preDeployCommand` was not attempted as part of
+this check's addition: that field only accepts a single command with no
+shell (see "What was tried and rejected" above), and `python
+scripts/preflight_check.py` is a single command, so it may well work there
+— left for a follow-up to actually verify live, rather than assumed.
+
+## Reconciling an uncertain prior order attempt
+
+An order that reached `RECONCILIATION_REQUIRED` and was later resolved by a
+*different*, independent commit attempt (a new transaction, not a retry of
+the same one) is not automatically closed out just because the later
+attempt succeeded — the earlier attempt's own row is a separate, still-open
+question: did it ever reach the business system at all, and under what
+idempotency key? Check `GET /management/orders?state=RECONCILIATION_REQUIRED`
+(supplier-agent's own `manage_organization`-scoped credential) for any row
+still in that state, and for each one, resolve it explicitly:
+
+1. Look up its `idempotency_key` directly against the business system (the
+   sandbox ERP's `GET /orders/{idempotency_key}`, over the private network
+   or a deliberate, temporary, explicitly-authorized exposure — never
+   assumed reachable from outside Railway's network).
+2. If the business system has no record for that key, the attempt never
+   reached it; nothing to reconcile against, but the row documents a real
+   failed attempt and should not be deleted.
+3. If the business system does have a record, confirm it matches what this
+   row expected (content hash / lines), and that no *other* row in this
+   service's own ledger claims the same `external_order_id` under a
+   different idempotency key — that would indicate a real duplicate, not
+   mere uncertainty.
+
+A later, successful, independently-idempotency-keyed commit for the same
+negotiation does not retroactively prove the earlier attempt was harmless
+— it only proves the later one worked.
