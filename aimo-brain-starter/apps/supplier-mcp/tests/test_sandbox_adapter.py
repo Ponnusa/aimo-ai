@@ -539,14 +539,17 @@ async def test_valid_backfill_fills_in_transaction_identity_after_recovery() -> 
 
 
 @pytest.mark.asyncio
-async def test_conflicting_retry_never_overwrites_the_first_backfill_or_resubmits() -> None:
-    """Acceptance criterion: a conflicting retry. Two different
-    execute_order calls presenting different agreement_id/content_hash
-    for the same recovered, unlinked key must never both backfill --
-    whichever commits first wins (matching this table's existing
-    first-write-wins idempotency guarantee), the second one gets that
-    same winning record back, and the business system never sees a
-    second submission either way."""
+async def test_conflicting_retry_arriving_after_a_committed_backfill_never_overwrites_it() -> None:
+    """Acceptance criterion: a conflicting retry (sequential case). Once
+    one retry's backfill has already committed, a second, later retry
+    presenting different agreement_id/content_hash for the same key
+    must never overwrite it -- ordinary idempotency, not the race case
+    below. (This alone does not exercise the UPDATE's own
+    recovered_without_request_context guard, since by the time the
+    second call runs, the flag is already False and the guard is never
+    reached -- see test_conflicting_retry_racing_for_the_same_backfill
+    for that.) The business system never sees a second submission
+    either way."""
     async with _running_sandbox_erp() as (erp_base_url, erp_token):
         _configure_sandbox_env(erp_base_url=erp_base_url, erp_token=erp_token)
         try:
@@ -603,6 +606,102 @@ async def test_conflicting_retry_never_overwrites_the_first_backfill_or_resubmit
                 assert row.buyer_organization_id == "org_fictional_bistro_01"
 
                 # No second ERP submission either way.
+                erp_record = await _get_order_directly_from_erp(
+                    erp_base_url=erp_base_url, erp_token=erp_token, idempotency_key=key
+                )
+                assert erp_record["found"] is True
+                assert erp_record["external_order_id"] == recovered["external_order_id"]
+        finally:
+            _reset_to_mock_adapter()
+
+
+@pytest.mark.asyncio
+async def test_conflicting_retry_racing_for_the_same_backfill() -> None:
+    """Acceptance criterion: a conflicting retry (the actual race). Two
+    differently-worded execute_order retries for the same recovered,
+    unlinked key, launched genuinely concurrently via ``asyncio.gather``
+    rather than one after the other, must still only ever let exactly
+    one of them backfill -- this is the scenario that actually
+    exercises the UPDATE's ``recovered_without_request_context.is_(True)``
+    WHERE-clause guard (not just the outer Python ``if``), because both
+    calls can observe the flag as still True before either commits. A
+    naive check-then-write without that guard could let both think they
+    won and corrupt the row with a mix of both calls' values; this test
+    asserts the persisted row is always one call's values in full,
+    never a mixture, and that the business system sees no second
+    submission regardless of which one wins."""
+    async with _running_sandbox_erp() as (erp_base_url, erp_token):
+        _configure_sandbox_env(erp_base_url=erp_base_url, erp_token=erp_token)
+        try:
+            app, settings = await _fresh_supplier_mcp_app()
+            port = find_free_port()
+            with running_server(app, port=port):
+                key = "idem_sandbox_racing_conflicting_retry"
+                execution_token = issue_service_credential(
+                    organization_id=ORG,
+                    scope="execute_order",
+                    signing_secret=settings.service_credential_signing_secret,
+                )
+                recovered = await _arm_timeout_and_recover(
+                    erp_base_url=erp_base_url, port=port, execution_token=execution_token, key=key
+                )
+
+                async def _retry(
+                    *, agreement_id: str, content_hash: str, buyer_organization_id: str
+                ):
+                    return await call_tool(
+                        server_url=f"http://127.0.0.1:{port}/mcp",
+                        token=execution_token,
+                        tool_name="execute_order",
+                        arguments={
+                            "idempotency_key": key,
+                            "agreement_id": agreement_id,
+                            "content_hash": content_hash,
+                            "buyer_organization_id": buyer_organization_id,
+                            "lines": [],
+                        },
+                    )
+
+                racer_a, racer_b = await asyncio.gather(
+                    _retry(
+                        agreement_id="txn_racer_a",
+                        content_hash="sha256:racer_a",
+                        buyer_organization_id="org_fictional_bistro_01",
+                    ),
+                    _retry(
+                        agreement_id="txn_racer_b",
+                        content_hash="sha256:racer_b",
+                        buyer_organization_id="org_fictional_different_buyer_99",
+                    ),
+                )
+                assert racer_a["duplicate"] is True
+                assert racer_b["duplicate"] is True
+                assert racer_a["external_order_id"] == recovered["external_order_id"]
+                assert racer_b["external_order_id"] == recovered["external_order_id"]
+
+                row = await _read_order_row(
+                    database_url=settings.supplier_mcp_database_url, idempotency_key=key
+                )
+                assert row.recovered_without_request_context is False
+                # Exactly one racer's values won -- in full, never a
+                # mixture of both (which a non-atomic check-then-write
+                # could produce: e.g. racer_a's agreement_id alongside
+                # racer_b's content_hash).
+                won_a = (row.agreement_id, row.content_hash, row.buyer_organization_id) == (
+                    "txn_racer_a",
+                    "sha256:racer_a",
+                    "org_fictional_bistro_01",
+                )
+                won_b = (row.agreement_id, row.content_hash, row.buyer_organization_id) == (
+                    "txn_racer_b",
+                    "sha256:racer_b",
+                    "org_fictional_different_buyer_99",
+                )
+                assert won_a or won_b, (
+                    f"row has a mixture of both racers' values, not either one cleanly: "
+                    f"{row.agreement_id!r}, {row.content_hash!r}, {row.buyer_organization_id!r}"
+                )
+
                 erp_record = await _get_order_directly_from_erp(
                     erp_base_url=erp_base_url, erp_token=erp_token, idempotency_key=key
                 )
