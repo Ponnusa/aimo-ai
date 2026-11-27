@@ -259,3 +259,173 @@ async def test_execute_order_reports_pending_for_delayed_ack() -> None:
                 assert status["external_order_id"] is not None
         finally:
             _reset_to_mock_adapter()
+
+
+async def _get_order_directly_from_erp(
+    *, erp_base_url: str, erp_token: str, idempotency_key: str
+) -> dict:
+    """Independent confirmation: reads the order straight from
+    sandbox-erp's own record, bypassing supplier-mcp entirely -- the
+    actual source of truth for whether an ERP order exists at all."""
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{erp_base_url}/orders/{idempotency_key}",
+            headers={"Authorization": f"Bearer {erp_token}"},
+        )
+    response.raise_for_status()
+    return response.json()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_submission_never_creates_a_second_erp_order() -> None:
+    """Acceptance criterion: duplicate submission. Calling execute_order
+    twice with the same idempotency_key must return the exact same
+    order both times, confirmed independently against sandbox-erp's own
+    record as exactly one order, never two."""
+    async with _running_sandbox_erp() as (erp_base_url, erp_token):
+        _configure_sandbox_env(erp_base_url=erp_base_url, erp_token=erp_token)
+        try:
+            app, settings = await _fresh_supplier_mcp_app()
+            port = find_free_port()
+            with running_server(app, port=port):
+                key = "idem_sandbox_duplicate"
+                execution_token = issue_service_credential(
+                    organization_id=ORG,
+                    scope="execute_order",
+                    signing_secret=settings.service_credential_signing_secret,
+                )
+                first = await call_tool(
+                    server_url=f"http://127.0.0.1:{port}/mcp",
+                    token=execution_token,
+                    tool_name="execute_order",
+                    arguments={
+                        "idempotency_key": key,
+                        "agreement_id": "txn_01",
+                        "content_hash": "sha256:abc",
+                        "buyer_organization_id": "org_fictional_bistro_01",
+                        "lines": [],
+                    },
+                )
+                assert first["duplicate"] is False
+                assert first["external_order_id"] is not None
+
+                second = await call_tool(
+                    server_url=f"http://127.0.0.1:{port}/mcp",
+                    token=execution_token,
+                    tool_name="execute_order",
+                    arguments={
+                        "idempotency_key": key,
+                        "agreement_id": "txn_01",
+                        "content_hash": "sha256:abc",
+                        "buyer_organization_id": "org_fictional_bistro_01",
+                        "lines": [],
+                    },
+                )
+                assert second["duplicate"] is True
+                assert second["external_order_id"] == first["external_order_id"]
+
+                erp_record = await _get_order_directly_from_erp(
+                    erp_base_url=erp_base_url, erp_token=erp_token, idempotency_key=key
+                )
+                assert erp_record["found"] is True
+                assert erp_record["external_order_id"] == first["external_order_id"]
+        finally:
+            _reset_to_mock_adapter()
+
+
+@pytest.mark.asyncio
+async def test_get_order_status_recovers_an_order_accepted_after_the_client_timed_out() -> None:
+    """Acceptance criterion: timeout after possible ERP acceptance,
+    recovery, and independent confirmation. ``execute_order`` writes no
+    local row on an adapter timeout (it never learned an
+    external_order_id) -- but sandbox-erp's own "timeout" fault keeps
+    processing the request after its client gives up (a real,
+    deliberately-reproduced race, not a simulated shortcut: the sandbox
+    adapter's HTTP client has a fixed 3s timeout, the fault sleeps
+    longer, and the server keeps running after the client disconnects
+    exactly as a real ERP's backend would). Without reconciling against
+    the business system directly when no local row exists, that order
+    would be stuck in RECONCILIATION_REQUIRED forever despite genuinely
+    having been accepted. Confirms recovery, and independently confirms
+    against sandbox-erp's own record that exactly one order exists."""
+    async with _running_sandbox_erp() as (erp_base_url, erp_token):
+        _configure_sandbox_env(erp_base_url=erp_base_url, erp_token=erp_token)
+        try:
+            app, settings = await _fresh_supplier_mcp_app()
+            port = find_free_port()
+            with running_server(app, port=port):
+                key = "idem_sandbox_timeout_then_recover"
+                async with httpx.AsyncClient() as client:
+                    await client.post(
+                        f"{erp_base_url}/admin/fault-injection/arm",
+                        json={"scenario": "timeout", "idempotency_key": key},
+                    )
+                execution_token = issue_service_credential(
+                    organization_id=ORG,
+                    scope="execute_order",
+                    signing_secret=settings.service_credential_signing_secret,
+                )
+                with pytest.raises(McpToolError):
+                    await call_tool(
+                        server_url=f"http://127.0.0.1:{port}/mcp",
+                        token=execution_token,
+                        tool_name="execute_order",
+                        arguments={
+                            "idempotency_key": key,
+                            "agreement_id": "txn_01",
+                            "content_hash": "sha256:abc",
+                            "buyer_organization_id": "org_fictional_bistro_01",
+                            "lines": [],
+                        },
+                    )
+                # No local row yet -- execute_order's own timeout path
+                # never learned an external_order_id to record.
+                immediately_after = await call_tool(
+                    server_url=f"http://127.0.0.1:{port}/mcp",
+                    token=execution_token,
+                    tool_name="get_order_status",
+                    arguments={"idempotency_key": key},
+                )
+                assert immediately_after["found"] is False
+
+                # sandbox-erp's own "timeout" fault keeps running past
+                # the client's 3s giveup (default
+                # fault_injection_timeout_seconds=5.0 > the adapter's
+                # fixed 3.0s client timeout) -- wait past that so the
+                # order genuinely exists server-side before reconciling.
+                await asyncio.sleep(3.0)
+
+                recovered = await call_tool(
+                    server_url=f"http://127.0.0.1:{port}/mcp",
+                    token=execution_token,
+                    tool_name="get_order_status",
+                    arguments={"idempotency_key": key},
+                )
+                assert recovered["found"] is True
+                assert recovered["status"] == "confirmed"
+                assert recovered["external_order_id"] is not None
+
+                erp_record = await _get_order_directly_from_erp(
+                    erp_base_url=erp_base_url, erp_token=erp_token, idempotency_key=key
+                )
+                assert erp_record["found"] is True
+                assert erp_record["external_order_id"] == recovered["external_order_id"]
+
+                # A genuine retry after recovery must still never create
+                # a second ERP order.
+                retried = await call_tool(
+                    server_url=f"http://127.0.0.1:{port}/mcp",
+                    token=execution_token,
+                    tool_name="execute_order",
+                    arguments={
+                        "idempotency_key": key,
+                        "agreement_id": "txn_01",
+                        "content_hash": "sha256:abc",
+                        "buyer_organization_id": "org_fictional_bistro_01",
+                        "lines": [],
+                    },
+                )
+                assert retried["duplicate"] is True
+                assert retried["external_order_id"] == recovered["external_order_id"]
+        finally:
+            _reset_to_mock_adapter()

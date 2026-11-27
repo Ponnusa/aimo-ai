@@ -483,7 +483,19 @@ def create_mcp_server(
         reconciles a locally-pending row against the configured adapter
         before answering, so a resolved delayed-ack order is reflected
         here without a separate sync step): the same narrow
-        ``execute_order`` scope as the execution tool itself."""
+        ``execute_order`` scope as the execution tool itself.
+
+        Also covers the case ``execute_order`` itself cannot: a
+        submission that got no response at all (the adapter's own HTTP
+        client timed out) writes no local row here, by design, because
+        it never learned an ``external_order_id`` to record. If the
+        business system actually accepted that order a little later --
+        a real risk whenever a timeout does not imply failure -- this
+        local table would otherwise never discover it, leaving the
+        order permanently stuck in ``RECONCILIATION_REQUIRED`` even
+        though it genuinely completed. So when no local row exists at
+        all, this also asks the adapter directly, exactly as it already
+        does for a locally-``pending`` row, and persists what it finds."""
         organization_id = await _authorize(
             ctx, tool_name="get_order_status", required_scope=EXECUTE_ORDER_SCOPE
         )
@@ -505,6 +517,44 @@ def create_mcp_server(
                     if remote.external_order_id:
                         record.external_order_id = remote.external_order_id
                     await session.commit()
+            elif record is None:
+                try:
+                    remote = await adapter.get_order_status(idempotency_key=idempotency_key)
+                except AdapterError:
+                    remote = None
+                if remote is not None and remote.found and remote.status != "pending":
+                    # agreement_id/buyer_organization_id/content_hash are
+                    # never known here -- this call only ever carries an
+                    # idempotency_key -- so they're left as empty-string
+                    # placeholders rather than fabricated. Harmless: none
+                    # of those three fields is ever part of this tool's
+                    # or execute_order's own response shape, only this
+                    # table's internal audit/dedup bookkeeping.
+                    record = SupplierMcpOrderRecord(
+                        idempotency_key=idempotency_key,
+                        agreement_id="",
+                        buyer_organization_id="",
+                        content_hash="",
+                        external_order_id=remote.external_order_id,
+                        status="confirmed" if remote.status == "confirmed" else remote.status,
+                        created_at=datetime.now(UTC).replace(tzinfo=None),
+                    )
+                    session.add(record)
+                    try:
+                        await session.commit()
+                    except IntegrityError:
+                        # Lost a race against a concurrent recovery (or
+                        # a genuine execute_order retry that succeeded
+                        # meanwhile) for the same key -- that row is now
+                        # the durable record; use it instead.
+                        await session.rollback()
+                        record = (
+                            await session.execute(
+                                select(SupplierMcpOrderRecord).where(
+                                    SupplierMcpOrderRecord.idempotency_key == idempotency_key
+                                )
+                            )
+                        ).scalar_one()
         await _audit(
             tool_name="get_order_status",
             organization_id=organization_id,
