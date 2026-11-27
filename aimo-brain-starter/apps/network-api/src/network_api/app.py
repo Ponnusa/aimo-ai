@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI, Header, HTTPException
-from message_integrity import DelegationError, KeyNotFoundError
+from message_integrity import KeyNotFoundError, ProofError
 from message_integrity.delegations import delegated_pubkey_thumbprint, verify_delegation_token
 from message_integrity.jwks import JwksResolver
 from message_integrity.keys import public_key_from_jwk
@@ -1150,7 +1150,16 @@ def create_app() -> FastAPI:
         resolver = _LocalOrganizationRootKeyResolver(session_factory)
         try:
             verified = await verify_delegation_token(body.jws, jwks_resolver=resolver)
-        except DelegationError as exc:
+        except ProofError as exc:
+            # Pre-existing gap found while adding supplier-agent delegated-
+            # signing test coverage: verify_delegation_token raises
+            # InvalidSignatureError/ExpiredProofError (ProofError's other
+            # direct subclasses, e.g. for a malformed, already-expired, or
+            # issuing-root-key-unresolvable token) just as often as it
+            # raises DelegationError itself (e.g. DelegationAudienceError).
+            # Catching only DelegationError let those cases fall through
+            # as an unhandled 500 instead of the same clean 400 every
+            # other rejection reason already got.
             raise HTTPException(status_code=400, detail=f"Invalid delegation token: {exc}") from exc
 
         if verified.organization_id != organization_id:
