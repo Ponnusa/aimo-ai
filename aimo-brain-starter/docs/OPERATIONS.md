@@ -201,6 +201,73 @@ shell (see "What was tried and rejected" above), and `python
 scripts/preflight_check.py` is a single command, so it may well work there
 — left for a follow-up to actually verify live, rather than assumed.
 
+## Deployment provenance: enforcing the preflight and the deployed SHA
+
+Found the hard way, twice, in the same staging exercise: once an operator
+is trusted to remember a manual step, they will eventually not. The
+`SUPPLIER_MCP_EXECUTION_CREDENTIAL` gap above went unnoticed for an
+unknown period because nothing enforced checking it; separately, a deploy
+of `supplier-agent`/`buyer-agent` was triggered without Railway's
+`latestCommit: true` flag and silently redeployed a stale commit instead
+of the one just merged — caught only because an operator happened to
+check the deployment's own recorded commit hash by hand afterward.
+Neither failure is survivable by "remember to check" alone.
+
+**`scripts/verify_deployment.py`** is the generic gate: given a Railway
+service id, the exact git SHA the release is supposed to be, and a health
+URL, it polls until the deployment reaches a terminal state, then fails
+loudly (nonzero exit, clear message on stderr) unless *all three* hold:
+the deployment's own recorded `commitHash` exactly matches the expected
+SHA, its status is `SUCCESS`, and the health URL answers `200` (with a
+short, bounded retry for the few seconds right after `SUCCESS` during
+which Railway's own edge can still 502 before routing to the new
+container — a real, directly observed timing gap, not assumed).
+
+```
+RAILWAY_TOKEN=... uv run python scripts/verify_deployment.py \
+    --service-id <railway-service-id> \
+    --expected-sha <full-40-char-git-sha> \
+    --health-url <https://.../health>
+```
+
+**`scripts/release_supplier_agent.py`** composes this with the preflight
+above into one enforced sequence for `supplier-agent` specifically — the
+preflight and the SHA/health check are both steps the release command
+itself runs, not two separate things an operator has to remember:
+
+1. Run `apps/supplier-agent/scripts/preflight_check.py` against the
+   service's own real environment (over `railway run`, which injects the
+   real variables locally — the credential's value is never read by, or
+   printed from, this orchestrating script). Stop here, before touching
+   the deployment, if this fails.
+2. Trigger a new deployment with `latestCommit: true` explicit (the flag
+   omitted during the finding above).
+3. Run `verify_deployment.py`'s check against the SHA this release
+   claims to be shipping.
+
+```
+RAILWAY_TOKEN=... uv run python scripts/release_supplier_agent.py \
+    --service-id <railway-service-id> \
+    --environment-id <railway-environment-id> \
+    --expected-sha <full-40-char-git-sha-you-intend-to-ship> \
+    --health-url <https://.../health>
+```
+
+Any step failing stops the release with a nonzero exit; it never falls
+through to a later step. Verified for real against the live staging
+`supplier-agent` service (2026-11-27): a deliberately wrong `--expected-sha`
+and a deliberately broken `--health-url` each failed with a distinct,
+correct message, and the full chained sequence (preflight → deploy →
+verify) succeeded end-to-end against the real deployment. `buyer-agent`
+has no execution-credential preflight of its own (it never calls
+`execute_order`), so only `verify_deployment.py` applies to it directly;
+a `release_buyer_agent.py` wrapper with no preflight step is a
+straightforward, not-yet-built follow-up if one becomes useful.
+
+This still does not replace a human deciding to ship — it only makes the
+two checks above impossible to accidentally skip once that decision is
+made.
+
 ## Reconciling an uncertain prior order attempt
 
 An order that reached `RECONCILIATION_REQUIRED` and was later resolved by a
