@@ -473,7 +473,7 @@ risking a retry bug under time pressure (a legitimate operator may need
 to re-confirm after an unrelated failure, which needs the same value
 served again).
 
-## Supplier-agent delegated signing (sandbox-proven; not yet deployed)
+## Supplier-agent delegated signing is supported and enforced at verification (sandbox-proven; not yet deployed)
 
 Until now, `supplier-agent` signed its outbound artifacts directly with
 its organization's root private key (ADR-017's "organization-level
@@ -486,6 +486,25 @@ scope, and the only revocation lever is rotating the entire root key
 corruption incident). `buyer-agent-ts` (the external TypeScript buyer)
 already self-bootstraps a delegated key via `EXTERNAL_ONBOARDING_ENABLED`;
 this was the first time it was proven for `supplier-agent` specifically.
+
+**What this proves, precisely:** delegated supplier signing works, and
+delegation is enforced at verification — every one of scope, audience,
+expiry, and revocation, specifically for commitment-adjacent artifact
+types (`authorization_evidence`, `order_commit_request`,
+`order_confirmation`), which always force a fresh, uncached fetch of
+both the delegation list and the signing JWKS rather than trusting a
+cached result. **What this does not prove, and must not be read as:**
+that the code structurally prevents `supplier-agent` from holding or
+using its organization's root key. `SUPPLIER_SIGNING_PRIVATE_KEY_PEM`
+(`apps/supplier-agent/src/supplier_agent/settings.py`) is a single,
+generic setting — there is no second "root key" field, and nothing in
+`sign_outbound_artifact` (`message_auth.py`) or anywhere else in this
+service can tell a delegated key from a root key by inspecting it. A
+deployment is "using delegated signing" only because an operator
+chooses to put a delegated key's PEM there instead of the root key's —
+an operator-enforced deployment requirement, not a code guarantee. This
+distinction was raised directly by an independent review of this work
+and is recorded here deliberately, not as a hedge.
 
 The delegation model itself needed no new code — `message_integrity`'s
 `build_delegation`/`verify_delegation_token`/`HttpDelegationResolver`,
@@ -502,11 +521,15 @@ generic across buyer and supplier. What this work added:
   with supplier signing every outbound artifact under a dedicated
   delegated key (never the org root key, which the test never even
   sets as `SUPPLIER_SIGNING_PRIVATE_KEY_PEM`); verification correctly
-  rejects an under-scoped delegation, a wrong-audience delegation, and
-  an already-expired delegation; revocation takes effect immediately;
-  and rotation (issuing a second delegation under the same root,
-  revoking the first) continues signing successfully under the new key
-  without ever touching the root key again.
+  rejects an under-scoped delegation and a wrong-audience delegation;
+  an already-expired delegation is rejected at publish time, and
+  separately, a delegation that was valid when published but expires
+  before a later verification is still rejected at verify time (proving
+  the fresh-fetch property above actually matters, not only the
+  earliest possible check); revocation takes effect immediately; and
+  rotation (issuing a second delegation under the same root, revoking
+  the first) continues signing successfully under the new key without
+  ever touching the root key again.
 - A genuine pre-existing bug found while building the expiry test case:
   `POST /organizations/{id}/delegations` caught only `DelegationError`
   around its token verification, but `verify_delegation_token` raises

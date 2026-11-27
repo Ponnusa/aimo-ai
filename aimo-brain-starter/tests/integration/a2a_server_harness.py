@@ -137,6 +137,7 @@ async def generate_and_register_delegated_signing_key(
     root_kid: str | None = None,
     root_private_key_pem: str | None = None,
     delegated_kid: str | None = None,
+    validity_seconds: int | None = None,
 ) -> DelegatedSigningKey:
     """End-to-end equivalent of ``scripts/issue_agent_delegation.py``,
     against a real test server rather than printed to a terminal: makes
@@ -162,6 +163,9 @@ async def generate_and_register_delegated_signing_key(
     delegated_kid = delegated_kid or f"{agent_id}-k1"
     delegated_jwk = public_key_to_jwk(delegated_public_key, kid=delegated_kid)
 
+    build_delegation_kwargs = {}
+    if validity_seconds is not None:
+        build_delegation_kwargs["validity_seconds"] = validity_seconds
     token = build_delegation(
         root_private_key=root_private_key,
         issuing_kid=root_kid,
@@ -171,6 +175,7 @@ async def generate_and_register_delegated_signing_key(
         delegated_kid=delegated_kid,
         delegated_public_key_jwk=delegated_jwk,
         scope=DelegationScope(artifact_types=artifact_types, protocol_version=protocol_version),
+        **build_delegation_kwargs,
     )
 
     async with httpx.AsyncClient() as client:

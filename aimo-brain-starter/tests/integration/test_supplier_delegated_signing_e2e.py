@@ -18,6 +18,7 @@ delegated key again).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import shutil
@@ -310,14 +311,19 @@ async def test_verification_rejects_delegation_with_wrong_audience(
             )
 
 
-async def test_verification_rejects_an_expired_delegation(
+async def test_publish_rejects_an_already_expired_delegation(
     network_server,  # noqa: F811 -- pytest fixtures, imported from the sibling e2e module
     registry_server,  # noqa: F811
     buyer_server,  # noqa: F811
 ) -> None:
-    """A delegation whose own exp has already passed must never
-    verify, even though the artifact it signs is itself freshly
-    signed and otherwise unexpired."""
+    """A delegation whose own exp has already passed at issuance must
+    never even be published -- network-api's own publish-time
+    verification rejects it outright, the earliest point this check can
+    fire. This is a distinct scenario from
+    ``test_verification_rejects_a_delegation_that_expires_before_use``
+    below: a delegation that was valid when published but has since
+    expired must also be rejected, specifically at verify time, not
+    only at publish time."""
     from message_integrity import generate_signing_keypair, public_key_to_jwk
 
     from .a2a_server_harness import generate_and_register_signing_key
@@ -353,6 +359,51 @@ async def test_verification_rejects_an_expired_delegation(
     # the expiry check can fire, and is itself the acceptance evidence.
     assert publish.status_code == 400, publish.text
     assert "expired" in publish.text.lower() or "exp" in publish.text.lower()
+
+
+async def test_verification_rejects_a_delegation_that_expires_before_use(
+    network_server,  # noqa: F811 -- pytest fixtures, imported from the sibling e2e module
+    registry_server,  # noqa: F811
+    buyer_server,  # noqa: F811
+) -> None:
+    """Publish-time rejection of an already-expired token (the test
+    above) only proves the earliest possible check. It does not prove
+    that a delegation genuinely *valid when published* is still
+    rejected once it expires before a later verification -- which is
+    the actual commit-time property this PR claims: commitment-adjacent
+    artifact types always force a fresh (uncached) delegation fetch, so
+    this must fail even though nothing here is served from a stale
+    cache. Publishes a delegation valid for only 2 seconds, waits past
+    that, then attempts a real trade and confirms it is rejected."""
+    with contextlib.ExitStack() as stack:
+        short_lived_key = await generate_and_register_delegated_signing_key(
+            network_api_base_url=network_server.base_url,
+            organization_id=SUPPLIER_ORG,
+            admin_key=ADMIN_KEY,
+            agent_id=SUPPLIER_AGENT_ID,
+            audience=NETWORK_AUDIENCE,
+            artifact_types=SUPPLIER_DELEGATION_SCOPE,
+            validity_seconds=2,
+        )
+        server = await _build_delegated_supplier_server(
+            registry_server=registry_server,
+            network_server=network_server,
+            delegated_key=short_lived_key,
+            stack=stack,
+        )
+        await asyncio.sleep(3.0)
+        # Collapses to the same "no currently-live delegation" message
+        # as a revoked or wrong-audience delegation -- HttpDelegationResolver's
+        # per-token catch treats an expired delegation's own
+        # verify_delegation_token failure as "this delegation is no
+        # longer valid," by design, not as a distinct error string.
+        with pytest.raises(Exception, match=r"[Nn]o currently-live delegation|[Ee]xpired"):
+            await _run_trade(
+                network_server=network_server,
+                registry_server=registry_server,
+                supplier_server=server,
+                buyer_server=buyer_server,
+            )
 
 
 async def test_rotation_old_key_revoked_new_key_continues_without_root_redeploy(
