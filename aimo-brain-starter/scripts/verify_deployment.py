@@ -26,6 +26,13 @@ Exit code 0 only if: a deployment reaches a terminal state within the
 timeout, its recorded commit hash exactly matches --expected-sha, its
 status is SUCCESS, and --health-url responds 200. Any other outcome is a
 distinct, clearly labeled failure on stderr and a nonzero exit code.
+
+Pass --deployment-id (the id a deploy-trigger call itself returned) to
+bind this check to that exact deployment. Without it, this checks
+--service-id's *latest* deployment instead, which a concurrent deploy on
+the same service could make a different one than intended -- fine for
+an ad-hoc manual check, not for an automated release (see
+`release_supplier_agent.py`, which always passes --deployment-id).
 """
 
 from __future__ import annotations
@@ -93,9 +100,20 @@ def _deployment_commit_hash(deployment_id: str) -> str | None:
     return meta.get("commitHash")
 
 
+def _deployment_status(deployment_id: str) -> str:
+    data = _railway_api('query { deployment(id: "' + deployment_id + '") { status } }')
+    return data["deployment"]["status"]
+
+
 def wait_for_terminal_deployment(
     service_id: str, *, timeout_seconds: float, poll_interval_seconds: float
 ) -> dict:
+    """Polls the service's own *latest* deployment. Only safe for ad-hoc,
+    manual checks -- a concurrent deploy on the same service (another
+    release, an auto-redeploy) can make "latest" a different deployment
+    than the one the caller actually triggered. A release orchestrator
+    must use `wait_for_terminal_deployment_by_id` with the deployment id
+    its own trigger call returned instead."""
     deadline = time.monotonic() + timeout_seconds
     last_status = None
     while time.monotonic() < deadline:
@@ -112,6 +130,25 @@ def wait_for_terminal_deployment(
     )
 
 
+def wait_for_terminal_deployment_by_id(
+    deployment_id: str, *, timeout_seconds: float, poll_interval_seconds: float
+) -> dict:
+    """Polls one specific deployment by id -- the deployment a release's
+    own trigger call actually created, not whatever the service's latest
+    deployment happens to be by the time this runs."""
+    deadline = time.monotonic() + timeout_seconds
+    last_status = None
+    while time.monotonic() < deadline:
+        last_status = _deployment_status(deployment_id)
+        if last_status in TERMINAL_STATUSES:
+            return {"id": deployment_id, "status": last_status}
+        time.sleep(poll_interval_seconds)
+    raise VerificationFailure(
+        f"Deployment {deployment_id!r} did not reach a terminal state within "
+        f"{timeout_seconds}s (last seen: {last_status!r})."
+    )
+
+
 def verify(
     *,
     service_id: str,
@@ -119,10 +156,25 @@ def verify(
     health_url: str,
     timeout_seconds: float,
     poll_interval_seconds: float,
+    deployment_id: str | None = None,
 ) -> None:
-    deployment = wait_for_terminal_deployment(
-        service_id, timeout_seconds=timeout_seconds, poll_interval_seconds=poll_interval_seconds
-    )
+    """Verifies a deployment matches `expected_sha`, reached SUCCESS, and
+    answers `health_url`. Pass `deployment_id` (the id a deploy-trigger
+    call itself returned) whenever one is available -- it binds this
+    check to that exact deployment. Without it, this falls back to
+    `service_id`'s latest deployment, which is weaker (see
+    `wait_for_terminal_deployment`'s docstring) and should only be used
+    for ad-hoc manual verification, never inside an automated release."""
+    if deployment_id is not None:
+        deployment = wait_for_terminal_deployment_by_id(
+            deployment_id,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+    else:
+        deployment = wait_for_terminal_deployment(
+            service_id, timeout_seconds=timeout_seconds, poll_interval_seconds=poll_interval_seconds
+        )
     if deployment["status"] != "SUCCESS":
         raise VerificationFailure(
             f"Deployment {deployment['id']} reached terminal status "
@@ -158,6 +210,13 @@ def verify(
     if last_error is not None:
         raise VerificationFailure(f"Health check at {health_url} {last_error} (after retries).")
 
+    # NOTE: a 200 from health_url proves the service is answering, not
+    # that this specific response came from the commit just checked --
+    # the commit-hash match above and the health check are two separate
+    # facts about the same deployment record, not one fact confirmed
+    # twice. A health response that echoed its own build SHA would close
+    # that gap; it does not today, and this is an accepted limitation of
+    # this release gate, not an oversight.
     print(
         f"VERIFIED: deployment {deployment['id']} is commit {actual_sha}, "
         f"status SUCCESS, health check 200 at {health_url}."
@@ -171,6 +230,15 @@ def main() -> int:
     parser.add_argument("--health-url", required=True)
     parser.add_argument("--timeout-seconds", type=float, default=300.0)
     parser.add_argument("--poll-interval-seconds", type=float, default=10.0)
+    parser.add_argument(
+        "--deployment-id",
+        default=None,
+        help=(
+            "The specific deployment to check, e.g. the id a deploy-trigger call "
+            "returned. Without this, falls back to the service's latest deployment "
+            "-- weaker, and only appropriate for ad-hoc manual checks."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.environ.get("RAILWAY_TOKEN"):
@@ -184,6 +252,7 @@ def main() -> int:
             health_url=args.health_url,
             timeout_seconds=args.timeout_seconds,
             poll_interval_seconds=args.poll_interval_seconds,
+            deployment_id=args.deployment_id,
         )
     except VerificationFailure as exc:
         print(f"VERIFICATION FAILED: {exc}", file=sys.stderr)

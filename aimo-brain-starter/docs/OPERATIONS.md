@@ -221,13 +221,21 @@ the deployment's own recorded `commitHash` exactly matches the expected
 SHA, its status is `SUCCESS`, and the health URL answers `200` (with a
 short, bounded retry for the few seconds right after `SUCCESS` during
 which Railway's own edge can still 502 before routing to the new
-container — a real, directly observed timing gap, not assumed).
+container — a real, directly observed timing gap, not assumed; this
+retry only covers that propagation delay and never substitutes for the
+SHA match above, which happens first and is never retried into a pass).
+Pass `--deployment-id` (the id a deploy-trigger call itself returned) to
+bind the check to that exact deployment; without it, the check falls
+back to the service's *latest* deployment, which a concurrent deploy on
+the same service could make a different one than intended — acceptable
+for an ad-hoc manual check, not for an automated release.
 
 ```
 RAILWAY_TOKEN=... uv run python scripts/verify_deployment.py \
     --service-id <railway-service-id> \
     --expected-sha <full-40-char-git-sha> \
-    --health-url <https://.../health>
+    --health-url <https://.../health> \
+    [--deployment-id <railway-deployment-id>]
 ```
 
 **`scripts/release_supplier_agent.py`** composes this with the preflight
@@ -236,14 +244,20 @@ preflight and the SHA/health check are both steps the release command
 itself runs, not two separate things an operator has to remember:
 
 1. Run `apps/supplier-agent/scripts/preflight_check.py` against the
-   service's own real environment (over `railway run`, which injects the
-   real variables locally — the credential's value is never read by, or
-   printed from, this orchestrating script). Stop here, before touching
-   the deployment, if this fails.
-2. Trigger a new deployment with `latestCommit: true` explicit (the flag
-   omitted during the finding above).
-3. Run `verify_deployment.py`'s check against the SHA this release
-   claims to be shipping.
+   target service's own real environment, scoped explicitly to
+   `--environment-id` (over `railway run --environment`, not whatever
+   environment happens to be linked locally — the credential's value is
+   never read by, or printed from, this orchestrating script). Stop
+   here, before touching the deployment, if this fails.
+2. Trigger a new deployment pinned to `--expected-sha` exactly
+   (`serviceInstanceDeployV2`'s `commitSha` argument, confirmed by
+   introspecting Railway's live GraphQL schema), which removes the
+   "latest commit on the branch" race entirely rather than only
+   detecting it afterward, and capture the deployment id the trigger
+   call itself returns.
+3. Run `verify_deployment.py`'s check bound to that exact deployment id
+   — not the service's "latest" deployment — against the SHA this
+   release claims to be shipping.
 
 ```
 RAILWAY_TOKEN=... uv run python scripts/release_supplier_agent.py \
@@ -254,19 +268,34 @@ RAILWAY_TOKEN=... uv run python scripts/release_supplier_agent.py \
 ```
 
 Any step failing stops the release with a nonzero exit; it never falls
-through to a later step. Verified for real against the live staging
-`supplier-agent` service (2026-11-27): a deliberately wrong `--expected-sha`
-and a deliberately broken `--health-url` each failed with a distinct,
-correct message, and the full chained sequence (preflight → deploy →
-verify) succeeded end-to-end against the real deployment. `buyer-agent`
-has no execution-credential preflight of its own (it never calls
-`execute_order`), so only `verify_deployment.py` applies to it directly;
-a `release_buyer_agent.py` wrapper with no preflight step is a
-straightforward, not-yet-built follow-up if one becomes useful.
+through to a later step. The original version of this sequence (using
+`latestCommit: true` and verifying the service's latest deployment by
+discovery rather than by id) was verified for real against the live
+staging `supplier-agent` service (2026-11-27): a deliberately wrong
+`--expected-sha` and a deliberately broken `--health-url` each failed
+with a distinct, correct message, and the full chained sequence
+(preflight → deploy → verify) succeeded end-to-end against the real
+deployment. The commit-pinned, deployment-id-bound version above has not
+been re-run live since; its logic was verified against Railway's live
+GraphQL schema (introspection confirmed `serviceInstanceDeployV2` takes
+`commitSha` and returns a deployment id) but not yet exercised against a
+real deploy. `buyer-agent` has no execution-credential preflight of its
+own (it never calls `execute_order`), so only `verify_deployment.py`
+applies to it directly; a `release_buyer_agent.py` wrapper with no
+preflight step is a straightforward, not-yet-built follow-up if one
+becomes useful.
 
 This still does not replace a human deciding to ship — it only makes the
 two checks above impossible to accidentally skip once that decision is
 made.
+
+**Known limitation:** a matching deployment record plus `200` from the
+health URL does not, by itself, prove that specific health response came
+from that exact commit — the commit-hash match and the health check are
+two separate facts read off the same deployment record, not one fact
+confirmed twice. A health response that echoed its own build SHA would
+close that gap; today's health endpoints do not, and this gate accepts
+that as a residual limitation rather than a defect.
 
 ## Reconciling an uncertain prior order attempt
 

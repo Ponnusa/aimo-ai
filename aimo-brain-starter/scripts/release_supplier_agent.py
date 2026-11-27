@@ -12,16 +12,22 @@ noticed, because nothing enforced checking it. Neither failure mode is
 survivable by "remember to check" alone, so this script makes both
 checks the actual gate for releasing this service, in this order:
 
-1. Preflight: run `scripts/preflight_check.py` against this service's
-   OWN live environment, over `railway run` (injects the real variables
-   locally; nothing is read from the Railway API or printed). Stops
-   here, before touching the deployment, if this fails.
-2. Deploy: trigger a new deployment from the latest commit on the given
-   branch (`latestCommit: true`, explicitly — the flag omitted during
-   the finding above).
-3. Verify: delegate to `scripts/verify_deployment.py`'s `verify()` to
-   confirm the deployment that actually runs is the commit this release
-   claims, reached SUCCESS, and answers its health check.
+1. Preflight: run `scripts/preflight_check.py` against the target
+   service's own live environment (`--environment-id`, explicit — not
+   whatever environment happens to be linked locally), over `railway
+   run` (injects the real variables locally; nothing is read from the
+   Railway API or printed). Stops here, before touching the deployment,
+   if this fails.
+2. Deploy: trigger a new deployment pinned to `--expected-sha` exactly
+   (`serviceInstanceDeployV2`'s `commitSha` argument), which removes the
+   "latest commit on the branch" race rather than only detecting it
+   afterward, and capture the deployment id the trigger call itself
+   returns.
+3. Verify: delegate to `scripts/verify_deployment.py`'s `verify()`,
+   bound to that exact deployment id -- not the service's "latest"
+   deployment, which a concurrent deploy could make a different one --
+   to confirm it is the commit this release claims, reached SUCCESS, and
+   answers its health check.
 
 Any step failing stops the release with a nonzero exit and a clear
 message; it never falls through to a later step on failure.
@@ -58,12 +64,17 @@ class ReleaseFailure(Exception):
     pass
 
 
-def run_preflight() -> None:
+def run_preflight(environment_id: str) -> None:
     """Runs `apps/supplier-agent/scripts/preflight_check.py` against this
     service's own real environment via `railway run`, from the service's
     own project directory (so `uv run` resolves the right workspace
-    package). Never reads or prints the credential's value itself --
-    only the script's own PASS/FAIL line, which is already safe."""
+    package). Explicitly scoped to `environment_id` -- the same
+    environment the release will deploy to -- rather than whatever
+    environment happens to be linked in the local Railway CLI config, so
+    a preflight pass can't be against a different environment than the
+    one actually being released. Never reads or prints the credential's
+    value itself -- only the script's own PASS/FAIL line, which is
+    already safe."""
     uv_bin = shutil.which("uv") or "uv"
     result = subprocess.run(
         [
@@ -71,6 +82,8 @@ def run_preflight() -> None:
             "run",
             "--service",
             "supplier-agent",
+            "--environment",
+            environment_id,
             "--",
             uv_bin,
             "run",
@@ -92,13 +105,26 @@ def run_preflight() -> None:
         )
 
 
-def trigger_deploy(service_id: str, environment_id: str) -> None:
+def trigger_deploy(service_id: str, environment_id: str, expected_sha: str) -> str:
+    """Triggers a deploy pinned to `expected_sha` exactly (via
+    `serviceInstanceDeployV2`'s `commitSha` argument), not "whatever is
+    latest on the tracked branch" -- which removes the race entirely
+    rather than only detecting it afterward: if `expected_sha` is not
+    deployable (e.g. not the branch head), Railway rejects the trigger
+    itself. Returns the deployment id the mutation itself reports, so the
+    caller can bind its later verification to that exact deployment
+    rather than to whatever the service's "latest" deployment happens to
+    be when it checks (`serviceInstanceDeployV2`'s own schema
+    description: "Returns a deployment ID" -- confirmed by introspecting
+    Railway's live GraphQL schema, not assumed)."""
     query = (
-        'mutation { serviceInstanceDeploy(serviceId: "'
+        'mutation { serviceInstanceDeployV2(serviceId: "'
         + service_id
         + '", environmentId: "'
         + environment_id
-        + '", latestCommit: true) }'
+        + '", commitSha: "'
+        + expected_sha
+        + '") }'
     )
     result = subprocess.run(
         [verify_deployment._RAILWAY_BIN, "api", query],
@@ -114,9 +140,11 @@ def trigger_deploy(service_id: str, environment_id: str) -> None:
         raise ReleaseFailure(
             f"Deploy trigger returned non-JSON output: {result.stdout[:500]!r}"
         ) from exc
-    if "errors" in body or not body.get("data", {}).get("serviceInstanceDeploy"):
+    deployment_id = body.get("data", {}).get("serviceInstanceDeployV2")
+    if "errors" in body or not deployment_id:
         raise ReleaseFailure(f"Deploy trigger did not report success: {body}")
-    print(f"Triggered deploy of service {service_id} from latest commit on its tracked branch.")
+    print(f"Triggered deploy {deployment_id} of service {service_id} at commit {expected_sha}.")
+    return deployment_id
 
 
 def main() -> int:
@@ -143,14 +171,15 @@ def main() -> int:
         if args.skip_preflight_for_local_dev:
             print("Preflight SKIPPED (--skip-preflight-for-local-dev) -- not a real release.")
         else:
-            run_preflight()
-        trigger_deploy(args.service_id, args.environment_id)
+            run_preflight(args.environment_id)
+        deployment_id = trigger_deploy(args.service_id, args.environment_id, args.expected_sha)
         verify_deployment.verify(
             service_id=args.service_id,
             expected_sha=args.expected_sha,
             health_url=args.health_url,
             timeout_seconds=300.0,
             poll_interval_seconds=10.0,
+            deployment_id=deployment_id,
         )
     except (ReleaseFailure, verify_deployment.VerificationFailure) as exc:
         print(f"RELEASE FAILED: {exc}", file=sys.stderr)
