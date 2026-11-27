@@ -42,12 +42,17 @@ async function main(): Promise<void> {
   // --- Layer 2: mint own ServiceCredential, register, verify ----------
   const serviceCredential = await client.issueServiceCredential(buyerOrganizationId, orgScopedCredential);
 
-  const challenge = startChallengeServer(selfPort, buildBuyerAgentCard(`http://127.0.0.1:${selfPort}`));
+  // The local HTTP server always binds to 127.0.0.1; the URL registry-api
+  // is told to fetch it from is a separate concern (e.g. a tunnel in front
+  // of it when this agent runs outside Railway's network) -- defaults to
+  // the local URL unchanged when none is given.
+  const publicBaseUrl = process.env.BUYER_PUBLIC_BASE_URL ?? `http://127.0.0.1:${selfPort}`;
+  const challenge = startChallengeServer(selfPort, buildBuyerAgentCard(publicBaseUrl));
   try {
     await client.registerAgent(serviceCredential.token, {
       agentId: buyerAgentId,
       organizationId: buyerOrganizationId,
-      a2aCardUrl: challenge.baseUrl,
+      a2aCardUrl: publicBaseUrl,
       signingPublicKeyJwk: JSON.parse(requireEnv("AGENT_PUBLIC_KEY_JWK")),
     });
 
