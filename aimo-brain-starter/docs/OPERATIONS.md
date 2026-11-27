@@ -106,3 +106,64 @@ main(argv=["upgrade", "head"])
   data-recovery problem, not something this procedure can generalize a fix
   for. Treat it the same as any other production incident: restore from a
   Neon point-in-time snapshot if the blast radius requires it.
+
+## Switching `supplier-mcp`'s business-system adapter (`mock` → `sandbox`)
+
+`SUPPLIER_BUSINESS_SYSTEM_ADAPTER` selects which business-system backend
+`supplier-mcp` calls for `execute_order`/`get_order_status`/catalogue reads.
+`mock` is in-process and has no external dependency; `sandbox` calls the
+real `supplier-sandbox-erp` service over Railway's private network with a
+scoped `use_sandbox_erp` credential. Treat flipping this variable as a
+deploy, not a configuration no-op — it changes which system durably records
+orders.
+
+**Before switching:**
+1. Confirm `supplier-sandbox-erp` is deployed, migrated, and (if newly
+   provisioned) seeded — see its own deployment/migration evidence.
+2. Confirm `supplier-mcp` already has `SANDBOX_ERP_BASE_URL` (the private
+   domain, `http://supplier-sandbox-erp.railway.internal:8007`) and
+   `SANDBOX_ERP_SERVICE_CREDENTIAL` (scope `use_sandbox_erp`, organization
+   matching `SUPPLIER_SANDBOX_ERP_ORGANIZATION_ID`) set correctly — setting
+   these does not itself switch the adapter and is safe to do in advance.
+3. Record the current live deployment ID before switching (`railway api`
+   query on `service(id).serviceInstances.edges[].node.latestDeployment`)
+   as the rollback point.
+
+**Switch:** set `SUPPLIER_BUSINESS_SYSTEM_ADAPTER=sandbox`, trigger a new
+deploy (env var changes require a fresh deploy to take effect — the running
+container does not hot-reload settings).
+
+**Verify through the real adapter path before trusting it** — not just
+that `supplier-sandbox-erp` responds directly, but that `supplier-mcp`'s own
+`execute_order`/`get_order_status`/`search_catalogue` tools work end to end
+over the private connection: a catalogue read returns real seeded data, an
+order call returns `confirmed` with a real `external_order_id`, replaying
+the same `idempotency_key` returns the identical `external_order_id` rather
+than creating a second order, and a delayed-ack order correctly reports
+`pending` then reconciles to `confirmed` on its own the next time
+`get_order_status` is called (no separate sync step) after the sandbox ERP
+resolves it. Until this passes, treat ordinary order traffic through this
+path as paused, not merely "proceed with caution."
+
+**Rollback:** set `SUPPLIER_BUSINESS_SYSTEM_ADAPTER` back to `mock` (or
+unset it — `mock` is the default) and trigger a new deploy. This is always
+safe to do immediately and takes effect on the next deploy; it does **not**
+retroactively undo anything the `sandbox` adapter already did against the
+real ERP. If a check fails with orders already created or left pending
+against the real ERP, reconcile or explicitly resolve those orders (via
+`supplier-sandbox-erp`'s own order-status/fault-injection endpoints, or a
+direct database read) **before** reverting the variable — reverting only
+stops *new* calls from reaching the sandbox adapter; it has no effect on
+rows already written.
+
+**This switch has no bearing on `external_onboarding_enabled`** — they are
+unrelated flags on different services. Confirm it separately if both are
+being touched in the same session.
+
+**Safety boundary, stated plainly:** nothing in `business_system_integration`'s
+adapter code enforces that `SANDBOX_ERP_BASE_URL` points at a non-production
+system — that boundary exists only because no production ERP URL or
+credential has ever been configured in this environment, not because of a
+technical safeguard. This switch procedure, and any authorization to perform
+it, covers the sandbox ERP only and never extends to a real production
+system or a real customer order.
