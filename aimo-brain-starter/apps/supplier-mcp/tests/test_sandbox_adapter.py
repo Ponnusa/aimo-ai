@@ -486,6 +486,48 @@ async def _read_order_row(*, database_url: str, idempotency_key: str):
         await engine.dispose()
 
 
+async def _count_backfill_audit_hits(*, database_url: str, idempotency_key: str) -> int:
+    """Counts how many ``execute_order`` audit entries for this key
+    actually logged "(backfilled transaction identity)" -- i.e. how
+    many of this key's UPDATE attempts actually matched/wrote a row
+    (``rowcount > 0``), not merely how many *attempted* one. With the
+    ``recovered_without_request_context.is_(True)`` guard in place,
+    exactly one concurrent retry's UPDATE can ever match (the row's
+    flag can only read True for one winning commit); without it, every
+    retry's UPDATE matches unconditionally by idempotency_key alone, so
+    this would count every racer that attempted a backfill, not just
+    the single legitimate winner -- unlike the final row's content
+    (which a single atomic UPDATE always writes as one consistent set
+    of values regardless of whether the guard exists, so it alone
+    cannot distinguish first-commit-wins from last-write-wins), the
+    *count* of successful backfills is the one observable that only the
+    atomic guard keeps at exactly one."""
+    from supplier_mcp.models import SupplierMcpToolInvocationRecord
+
+    engine = new_engine(database_url)
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            rows = (
+                (
+                    await session.execute(
+                        select(SupplierMcpToolInvocationRecord).where(
+                            SupplierMcpToolInvocationRecord.tool_name == "execute_order",
+                            SupplierMcpToolInvocationRecord.success.is_(True),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+    finally:
+        await engine.dispose()
+    return sum(
+        1
+        for row in rows
+        if idempotency_key in row.detail and "backfilled transaction identity" in row.detail
+    )
+
+
 @pytest.mark.asyncio
 async def test_valid_backfill_fills_in_transaction_identity_after_recovery() -> None:
     """Acceptance criterion: backfill from a valid retry. After
@@ -621,15 +663,26 @@ async def test_conflicting_retry_racing_for_the_same_backfill() -> None:
     differently-worded execute_order retries for the same recovered,
     unlinked key, launched genuinely concurrently via ``asyncio.gather``
     rather than one after the other, must still only ever let exactly
-    one of them backfill -- this is the scenario that actually
+    one of them actually backfill -- this is the scenario that
     exercises the UPDATE's ``recovered_without_request_context.is_(True)``
     WHERE-clause guard (not just the outer Python ``if``), because both
-    calls can observe the flag as still True before either commits. A
-    naive check-then-write without that guard could let both think they
-    won and corrupt the row with a mix of both calls' values; this test
-    asserts the persisted row is always one call's values in full,
-    never a mixture, and that the business system sees no second
-    submission regardless of which one wins."""
+    calls can observe the flag as still True before either commits.
+
+    The decisive check is the count of audit entries that logged
+    "(backfilled transaction identity)" (see
+    ``_count_backfill_audit_hits``'s own docstring for why): the final
+    row's content alone cannot tell a guarded, first-commit-wins UPDATE
+    apart from an unguarded one, because either way a single atomic SQL
+    UPDATE statement always writes one internally-consistent set of
+    values, never a column-level mixture -- removing the guard would
+    simply let the row end up as *whichever retry's UPDATE statement
+    happens to run last*, still "one call's values in full." Without
+    the guard, idempotency_key alone matches the row unconditionally,
+    so *every* concurrent retry's UPDATE would match and count as a
+    backfill, not just one; this is what actually distinguishes the two
+    (confirmed directly: an independent review of an earlier version of
+    this test found it passed identically even with the guard entirely
+    removed, for exactly this reason)."""
     async with _running_sandbox_erp() as (erp_base_url, erp_token):
         _configure_sandbox_env(erp_base_url=erp_base_url, erp_token=erp_token)
         try:
@@ -700,6 +753,20 @@ async def test_conflicting_retry_racing_for_the_same_backfill() -> None:
                 assert won_a or won_b, (
                     f"row has a mixture of both racers' values, not either one cleanly: "
                     f"{row.agreement_id!r}, {row.content_hash!r}, {row.buyer_organization_id!r}"
+                )
+
+                # The decisive check: exactly one of the two concurrent
+                # retries' UPDATEs actually matched/wrote a row. Without
+                # the recovered_without_request_context.is_(True) guard,
+                # BOTH would match unconditionally on idempotency_key
+                # alone and both would log a successful backfill here.
+                backfill_hits = await _count_backfill_audit_hits(
+                    database_url=settings.supplier_mcp_database_url, idempotency_key=key
+                )
+                assert backfill_hits == 1, (
+                    f"expected exactly one of the two concurrent retries to actually "
+                    f"backfill (the atomic guard enforces first-commit-wins); got "
+                    f"{backfill_hits} -- the guard did not limit this to a single writer."
                 )
 
                 erp_record = await _get_order_directly_from_erp(
