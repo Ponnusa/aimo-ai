@@ -23,7 +23,10 @@ import pytest
 import uvicorn
 from fastapi import FastAPI
 from mcp_integration import McpToolError, call_tool
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from supplier_mcp.app import create_app
+from supplier_mcp.models import SupplierMcpOrderRecord
 from supplier_mcp.settings import get_settings
 
 from database import Base, new_engine
@@ -427,5 +430,183 @@ async def test_get_order_status_recovers_an_order_accepted_after_the_client_time
                 )
                 assert retried["duplicate"] is True
                 assert retried["external_order_id"] == recovered["external_order_id"]
+        finally:
+            _reset_to_mock_adapter()
+
+
+async def _arm_timeout_and_recover(
+    *, erp_base_url: str, port: int, execution_token: str, key: str
+) -> dict:
+    """Shared setup for the three tests below: reproduces the same
+    timeout-then-recover race as the test above, leaving a row with
+    ``recovered_without_request_context=True`` and no known
+    agreement_id/buyer_organization_id/content_hash, then returns the
+    recovered ``get_order_status`` result."""
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            f"{erp_base_url}/admin/fault-injection/arm",
+            json={"scenario": "timeout", "idempotency_key": key},
+        )
+    with pytest.raises(McpToolError):
+        await call_tool(
+            server_url=f"http://127.0.0.1:{port}/mcp",
+            token=execution_token,
+            tool_name="execute_order",
+            arguments={
+                "idempotency_key": key,
+                "agreement_id": "txn_01",
+                "content_hash": "sha256:abc",
+                "buyer_organization_id": "org_fictional_bistro_01",
+                "lines": [],
+            },
+        )
+    await asyncio.sleep(3.0)
+    recovered = await call_tool(
+        server_url=f"http://127.0.0.1:{port}/mcp",
+        token=execution_token,
+        tool_name="get_order_status",
+        arguments={"idempotency_key": key},
+    )
+    assert recovered["found"] is True
+    return recovered
+
+
+async def _read_order_row(*, database_url: str, idempotency_key: str):
+    engine = new_engine(database_url)
+    try:
+        async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+            return (
+                await session.execute(
+                    select(SupplierMcpOrderRecord).where(
+                        SupplierMcpOrderRecord.idempotency_key == idempotency_key
+                    )
+                )
+            ).scalar_one()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_valid_backfill_fills_in_transaction_identity_after_recovery() -> None:
+    """Acceptance criterion: backfill from a valid retry. After
+    recovery leaves a row with no known transaction identity, the first
+    genuine ``execute_order`` retry for that key safely backfills
+    agreement_id/buyer_organization_id/content_hash and clears
+    ``recovered_without_request_context`` -- never left permanently
+    unlinked when real identity is available."""
+    async with _running_sandbox_erp() as (erp_base_url, erp_token):
+        _configure_sandbox_env(erp_base_url=erp_base_url, erp_token=erp_token)
+        try:
+            app, settings = await _fresh_supplier_mcp_app()
+            port = find_free_port()
+            with running_server(app, port=port):
+                key = "idem_sandbox_valid_backfill"
+                execution_token = issue_service_credential(
+                    organization_id=ORG,
+                    scope="execute_order",
+                    signing_secret=settings.service_credential_signing_secret,
+                )
+                await _arm_timeout_and_recover(
+                    erp_base_url=erp_base_url, port=port, execution_token=execution_token, key=key
+                )
+                row = await _read_order_row(
+                    database_url=settings.supplier_mcp_database_url, idempotency_key=key
+                )
+                assert row.recovered_without_request_context is True
+                assert row.agreement_id == ""
+
+                await call_tool(
+                    server_url=f"http://127.0.0.1:{port}/mcp",
+                    token=execution_token,
+                    tool_name="execute_order",
+                    arguments={
+                        "idempotency_key": key,
+                        "agreement_id": "txn_backfill_01",
+                        "content_hash": "sha256:backfilled",
+                        "buyer_organization_id": "org_fictional_bistro_01",
+                        "lines": [],
+                    },
+                )
+                row_after = await _read_order_row(
+                    database_url=settings.supplier_mcp_database_url, idempotency_key=key
+                )
+                assert row_after.recovered_without_request_context is False
+                assert row_after.agreement_id == "txn_backfill_01"
+                assert row_after.content_hash == "sha256:backfilled"
+                assert row_after.buyer_organization_id == "org_fictional_bistro_01"
+        finally:
+            _reset_to_mock_adapter()
+
+
+@pytest.mark.asyncio
+async def test_conflicting_retry_never_overwrites_the_first_backfill_or_resubmits() -> None:
+    """Acceptance criterion: a conflicting retry. Two different
+    execute_order calls presenting different agreement_id/content_hash
+    for the same recovered, unlinked key must never both backfill --
+    whichever commits first wins (matching this table's existing
+    first-write-wins idempotency guarantee), the second one gets that
+    same winning record back, and the business system never sees a
+    second submission either way."""
+    async with _running_sandbox_erp() as (erp_base_url, erp_token):
+        _configure_sandbox_env(erp_base_url=erp_base_url, erp_token=erp_token)
+        try:
+            app, settings = await _fresh_supplier_mcp_app()
+            port = find_free_port()
+            with running_server(app, port=port):
+                key = "idem_sandbox_conflicting_retry"
+                execution_token = issue_service_credential(
+                    organization_id=ORG,
+                    scope="execute_order",
+                    signing_secret=settings.service_credential_signing_secret,
+                )
+                recovered = await _arm_timeout_and_recover(
+                    erp_base_url=erp_base_url, port=port, execution_token=execution_token, key=key
+                )
+
+                first = await call_tool(
+                    server_url=f"http://127.0.0.1:{port}/mcp",
+                    token=execution_token,
+                    tool_name="execute_order",
+                    arguments={
+                        "idempotency_key": key,
+                        "agreement_id": "txn_first",
+                        "content_hash": "sha256:first",
+                        "buyer_organization_id": "org_fictional_bistro_01",
+                        "lines": [],
+                    },
+                )
+                second = await call_tool(
+                    server_url=f"http://127.0.0.1:{port}/mcp",
+                    token=execution_token,
+                    tool_name="execute_order",
+                    arguments={
+                        "idempotency_key": key,
+                        "agreement_id": "txn_second_conflicting",
+                        "content_hash": "sha256:second_conflicting",
+                        "buyer_organization_id": "org_fictional_different_buyer_99",
+                        "lines": [],
+                    },
+                )
+                assert first["duplicate"] is True
+                assert second["duplicate"] is True
+                assert first["external_order_id"] == recovered["external_order_id"]
+                assert second["external_order_id"] == recovered["external_order_id"]
+
+                row = await _read_order_row(
+                    database_url=settings.supplier_mcp_database_url, idempotency_key=key
+                )
+                # The first retry's identity won; the second's never
+                # got written anywhere -- no merge, no overwrite.
+                assert row.recovered_without_request_context is False
+                assert row.agreement_id == "txn_first"
+                assert row.content_hash == "sha256:first"
+                assert row.buyer_organization_id == "org_fictional_bistro_01"
+
+                # No second ERP submission either way.
+                erp_record = await _get_order_directly_from_erp(
+                    erp_base_url=erp_base_url, erp_token=erp_token, idempotency_key=key
+                )
+                assert erp_record["found"] is True
+                assert erp_record["external_order_id"] == recovered["external_order_id"]
         finally:
             _reset_to_mock_adapter()

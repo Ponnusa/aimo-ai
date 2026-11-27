@@ -499,13 +499,26 @@ ERP-owner cooperation:
   functional (every method still raises `NotImplementedError` pending a
   real implementation), but a deployment can no longer select a
   production business system by accident.
-- **Network/credential separation.** `SupplierMcpSettings` now rejects,
-  at settings-construction time, a sandbox and a production (`valio_aimo`)
-  base URL or credential that are configured identically — a copy-paste
-  mistake can no longer make the sandbox adapter double as a path to a
-  production system, or vice versa. (The two adapters already lived in
-  entirely separate code paths reading entirely separate settings
-  fields; this guards against someone making the *values* collide.)
+- **Configuration collision checks — explicitly not network isolation.**
+  `SupplierMcpSettings` now rejects, at settings-construction time, a
+  sandbox and a production (`valio_aimo`) base URL or credential that
+  are configured identically — a pure in-process string-equality check
+  on two already-loaded config values, nothing more. **This provides no
+  actual network-level isolation, no egress control, and no credential-
+  scope enforcement by any receiving system.** It catches one specific
+  copy-paste mistake (the sandbox adapter's value and the production
+  adapter's value being made byte-identical) and nothing else — it does
+  not stop the sandbox adapter from being pointed at a genuine
+  production host that simply has a *different* string value, and the
+  check is skipped entirely whenever either side is left unconfigured
+  (e.g. `VALIO_AIMO_BASE_URL` unset). Genuine network/credential
+  isolation would require separate network segments or egress
+  allowlists so the sandbox adapter's process is infrastructurally
+  incapable of reaching a production host regardless of configuration,
+  and credential scopes enforced by the receiving system itself — none
+  of that exists here. This gap in the original wording of this section
+  was raised directly by an independent review and corrected rather than
+  left implied.
 - **A genuine reconciliation bug found and fixed while building the
   duplicate/timeout/recovery test coverage below:** `get_order_status`
   only re-checked the configured adapter when a *locally-pending* row
@@ -517,8 +530,19 @@ ERP-owner cooperation:
   `found=False` immediately, without ever asking the adapter. That order
   would have stayed in `RECONCILIATION_REQUIRED` forever, even though it
   genuinely completed. Fixed: `get_order_status` now also asks the
-  adapter directly when no local row exists, and persists what it finds.
-  See `apps/supplier-mcp/src/supplier_mcp/server.py`.
+  adapter directly when no local row exists, and persists what it finds
+  — but the resulting row's `agreement_id`/`buyer_organization_id`/
+  `content_hash` are unknown at that point (this call only ever carries
+  an idempotency_key), so it is marked `recovered_without_request_context`
+  rather than left indistinguishable from an ordinary, fully-linked
+  order. `execute_order`'s own existing-row branch backfills those three
+  fields from the first genuine retry it sees for that key (an
+  authenticated call, matched by the same idempotency_key, carrying the
+  real business content) and clears the flag — guarded so a second,
+  differently-worded retry racing against the first can never overwrite
+  whichever backfill commits first, and never triggers a second
+  submission to the business system either way. See
+  `apps/supplier-mcp/src/supplier_mcp/server.py` and `models.py`.
 - **New test coverage** (`apps/supplier-mcp/tests/test_sandbox_adapter.py`,
   `apps/supplier-mcp/tests/test_adapter_factory_authorization.py`), all
   against the real sandbox ERP over real HTTP, never mocked:
@@ -526,9 +550,12 @@ ERP-owner cooperation:
   result, independently confirmed as exactly one order in sandbox-erp's
   own record); timeout-after-possible-acceptance and recovery (the race
   above, reconciled, then independently confirmed against sandbox-erp);
-  the adapter-selection fail-closed gate (unauthorized, authorized-but-
-  unconfigured, and successfully-gated cases); and the sandbox/production
-  configuration-collision guard.
+  a valid backfill after recovery; a conflicting retry (two different
+  business contents for the same recovered key — first write wins, the
+  loser never overwrites it, and sandbox-erp confirms no second order
+  either way); the adapter-selection fail-closed gate (unauthorized,
+  authorized-but-unconfigured, and successfully-gated cases); and the
+  sandbox/production configuration-collision guard.
 
 **Explicitly not done, and not claimed:** no production adapter exists;
 no ERP owner has been contacted or has authorized anything; no pilot,
